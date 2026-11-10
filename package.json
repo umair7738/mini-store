@@ -1,0 +1,13 @@
+{
+  "name": "danube-milano-mini-store",
+  "private": true,
+  "workspaces": ["apps/api", "apps/web"],
+  "scripts": {
+    "dev:api": "npm run dev --workspace @mini-store/api",
+    "dev:web": "npm run dev --workspace @mini-store/web",
+    "db:migrate": "npm run db:migrate --workspace @mini-store/api",
+    "db:seed": "npm run db:seed --workspace @mini-store/api",
+    "admin:create": "npm run admin:create --workspace @mini-store/api",
+    "test": "npm run test --workspace @mini-store/api"
+  }
+}
