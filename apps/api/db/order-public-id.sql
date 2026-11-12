@@ -1,0 +1,2 @@
+ALTER TABLE orders
+  ADD COLUMN public_id CHAR(36) NULL AFTER id;

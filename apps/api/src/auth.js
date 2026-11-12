@@ -8,12 +8,9 @@ import {
 import { Router } from "express";
 import { pool } from "./db.js";
 import { HttpError, email, object, string } from "./validation.js";
+import { clientAddress, identifierHash, rateLimit } from "./rateLimit.js";
 
 export const authRouter = Router();
-const loginAttempts = new Map();
-const loginWindowMs = 60_000;
-const maxLoginFailures = 5;
-// shortcut: process-local limits do not coordinate across API instances; use a shared limiter before multi-instance deployment.
 authRouter.use((req, res, next) => {
   res.set("Cache-Control", "no-store");
   next();
@@ -37,37 +34,12 @@ function passwordMatches(password, saved) {
   return expected.length > 0 && timingSafeEqual(actual, expected);
 }
 
-function loginRateKey(req) {
-  return req.ip || "unknown";
-}
-
-function checkLoginRate(req, res) {
-  const key = loginRateKey(req);
-  const attempt = loginAttempts.get(key);
-  if (!attempt || attempt.resetAt <= Date.now()) {
-    loginAttempts.delete(key);
-    return;
-  }
-  if (attempt.failures >= maxLoginFailures) {
-    res.set("Retry-After", String(Math.ceil((attempt.resetAt - Date.now()) / 1000)));
-    throw new HttpError(429, "LOGIN_RATE_LIMITED", "Too many login attempts");
-  }
-}
-
-function recordLoginFailure(req) {
-  const key = loginRateKey(req);
-  const now = Date.now();
-  const attempt = loginAttempts.get(key);
-  if (!attempt || attempt.resetAt <= now) {
-    loginAttempts.set(key, { failures: 1, resetAt: now + loginWindowMs });
-  } else {
-    attempt.failures += 1;
-  }
-}
-
-authRouter.post("/login", async (req, res) => {
-  checkLoginRate(req, res);
-  object(req.body);
+authRouter.post(
+  "/login",
+  rateLimit({ name: "admin-login-ip", limitEnv: "RATE_LIMIT_ADMIN_LOGIN_PER_MINUTE", fallbackLimit: 5, key: (req) => [clientAddress(req)], code: "LOGIN_RATE_LIMITED", message: "Too many login attempts" }),
+  rateLimit({ name: "admin-login-account", limitEnv: "RATE_LIMIT_ADMIN_LOGIN_PER_ACCOUNT_PER_MINUTE", fallbackLimit: 5, key: (req) => [clientAddress(req), identifierHash(req.body?.email)], code: "LOGIN_RATE_LIMITED", message: "Too many login attempts" }),
+  async (req, res) => {
+  object(req.body, ["email", "password"]);
   const address = email(req.body.email);
   const password = string(req.body.password, "Password", 1024);
   const [users] = await pool.execute(
@@ -75,7 +47,6 @@ authRouter.post("/login", async (req, res) => {
     [address],
   );
   if (!users.length || !passwordMatches(password, users[0].password_hash)) {
-    recordLoginFailure(req);
     throw new HttpError(
       401,
       "INVALID_CREDENTIALS",
@@ -83,9 +54,8 @@ authRouter.post("/login", async (req, res) => {
     );
   }
 
-  loginAttempts.delete(loginRateKey(req));
-
   const token = randomBytes(32).toString("base64url");
+  if (req.cookies[cookieName]) await pool.execute("DELETE FROM admin_sessions WHERE token_hash = ?", [hashToken(req.cookies[cookieName])]);
   await pool.execute(
     "INSERT INTO admin_sessions (token_hash, admin_user_id, expires_at) VALUES (?, ?, DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 12 HOUR))",
     [hashToken(token), users[0].id],
@@ -95,7 +65,8 @@ authRouter.post("/login", async (req, res) => {
     maxAge: 12 * 60 * 60 * 1000,
   });
   res.json({ email: address, csrfToken: csrfToken(token) });
-});
+  },
+);
 
 export async function requireAdmin(req, res, next) {
   try {

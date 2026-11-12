@@ -1,23 +1,12 @@
-import Link from "next/link";
+import StoreFooter from "./components/StoreFooter";
+import StoreHeader from "./components/StoreHeader";
 
 export default function StoreLayout({ children }) {
   return (
     <>
-      <header className="site-header">
-        <Link href="/" className="brand">
-          DANUBE <span>MILANO</span>
-        </Link>
-        <nav aria-label="Main navigation">
-          <Link href="/">Shop</Link>
-          <Link href="/cart">Cart</Link>
-          <Link href="/admin">Admin</Link>
-        </nav>
-      </header>
+      <StoreHeader />
       <main>{children}</main>
-      <footer className="site-footer">
-        <span>DANUBE MILANO</span>
-        <span>Bathroom essentials · AED</span>
-      </footer>
+      <StoreFooter />
     </>
   );
 }

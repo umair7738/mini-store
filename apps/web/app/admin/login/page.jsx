@@ -54,6 +54,7 @@ export default function AdminLoginPage() {
           Email
           <input
             name="email"
+            autoComplete="username"
             type="email"
             required
             maxLength="254"
@@ -65,6 +66,7 @@ export default function AdminLoginPage() {
           Password
           <input
             name="password"
+            autoComplete="current-password"
             type="password"
             required
             maxLength="1024"

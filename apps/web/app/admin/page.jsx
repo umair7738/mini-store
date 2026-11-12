@@ -81,10 +81,7 @@ export default function AdminOverviewPage() {
   }, [request, retry]);
 
   const active = products?.filter((product) => product.isActive) || [];
-  const variants = active.flatMap((product) =>
-    product.variants.filter((variant) => variant.isActive),
-  );
-  const lowStock = variants.filter((variant) => variant.stock <= 5);
+  const lowStock = active.filter((product) => product.stock <= 5);
   const openOrders = orders?.filter((order) =>
     ["placed", "processing", "shipped"].includes(order.status),
   ) || [];
@@ -112,10 +109,10 @@ export default function AdminOverviewPage() {
       {products && orders && (
         <>
           <div className="admin-stat-grid">
-            <div className="admin-stat"><span>Open orders</span><strong>{openOrders.length}</strong><small>Need fulfilment work</small></div>
-            <div className="admin-stat"><span>Ready to dispatch</span><strong>{preparing.length}</strong><small>Carrier details still needed</small></div>
-            <div className="admin-stat"><span>On the way</span><strong>{dispatched.length}</strong><small>Awaiting delivery</small></div>
-            <div className="admin-stat"><span>Low stock</span><strong>{lowStock.length}</strong><small>{variants.length} sellable variants</small></div>
+             <div className="admin-stat"><span>Total products</span><strong>{products.length}</strong><small>Catalogue families</small></div>
+             <div className="admin-stat"><span>Active products</span><strong>{active.length}</strong><small>Visible on storefront</small></div>
+             <div className="admin-stat"><span>Low stock</span><strong>{lowStock.length}</strong><small>Products with five units or fewer</small></div>
+             <div className="admin-stat"><span>Total orders</span><strong>{orders.length}</strong><small>{openOrders.length} still open</small></div>
           </div>
 
           <div className="dashboard-main-grid">
@@ -145,7 +142,7 @@ export default function AdminOverviewPage() {
                   <div className="admin-orders-header" role="row"><span>Order</span><span>Customer</span><span>Status</span><span>Total</span></div>
                   {orders.slice(0, 5).map((order) => (
                     <Link href="/admin/orders" key={order.id} className="admin-orders-row" role="row">
-                      <strong>#{order.id}</strong>
+                      <strong>{order.orderNumber}</strong>
                       <span><strong>{order.name}</strong><small>{new Date(order.createdAt).toLocaleDateString("en-AE")}</small></span>
                       <span className={`status-pill ${order.status}`}>{statusLabel[order.status]}</span>
                       <strong>{money(order.totalFils)}</strong>
@@ -155,11 +152,8 @@ export default function AdminOverviewPage() {
               ) : <p className="admin-empty">No orders yet.</p>}
             </section>
             <section className="admin-card stock-card">
-              <div className="dashboard-card-heading"><div><h2>Inventory watch</h2><p>Variants at five units or fewer</p></div><Link href="/admin/products">Manage stock</Link></div>
-              {lowStock.length ? lowStock.slice(0, 5).map((variant) => {
-                const product = active.find((item) => item.variants.some((entry) => entry.id === variant.id));
-                return <div className="stock-watch-row" key={variant.id}><span><strong>{product.name}</strong><small>{variant.label} · {variant.sku}</small></span><strong>{variant.stock}</strong></div>;
-              }) : <p className="admin-empty">No low-stock variants.</p>}
+              <div className="dashboard-card-heading"><div><h2>Inventory watch</h2><p>Products at five units or fewer</p></div><Link href="/admin/products">Manage stock</Link></div>
+              {lowStock.length ? lowStock.slice(0, 5).map((product) => <div className="stock-watch-row" key={product.id}><span><strong>{product.name}</strong><small>{product.sku}</small></span><strong>{product.stock}</strong></div>) : <p className="admin-empty">No low-stock products.</p>}
             </section>
           </div>
         </>

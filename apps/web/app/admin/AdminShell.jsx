@@ -24,6 +24,7 @@ export default function AdminShell({ children }) {
   const [session, setSession] = useState(null);
   const [problem, setProblem] = useState("");
   const [retry, setRetry] = useState(0);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
     if (isLogin) return;
@@ -57,7 +58,7 @@ export default function AdminShell({ children }) {
         ...options,
         cache: "no-store",
         headers: {
-          ...(options.body && { "Content-Type": "application/json" }),
+          ...(options.body && !(options.body instanceof FormData) && { "Content-Type": "application/json" }),
           ...(options.method && { "X-CSRF-Token": session.csrfToken }),
           ...options.headers,
         },
@@ -107,7 +108,8 @@ export default function AdminShell({ children }) {
     <AdminContext.Provider value={{ ...session, request }}>
       <div className="admin-shell">
         <a className="skip-link" href="#admin-main">Skip to content</a>
-        <aside className="admin-sidebar">
+        <button className="admin-mobile-toggle" type="button" aria-expanded={menuOpen} aria-controls="admin-navigation" onClick={() => setMenuOpen(!menuOpen)}>Menu</button>
+        <aside className={`admin-sidebar ${menuOpen ? "open" : ""}`} id="admin-navigation">
           <Link href="/admin" className="admin-brand">
             <span>DANUBE <em>MILANO</em></span>
             <small>STORE ADMIN</small>
@@ -115,12 +117,13 @@ export default function AdminShell({ children }) {
           <p className="admin-nav-label">Workspace</p>
           <nav className="admin-nav" aria-label="Admin navigation">
             {links.map(([href, label]) => (
-              <Link
+                <Link
                 href={href}
                 key={href}
                 className={pathname === href ? "active" : ""}
                 aria-current={pathname === href ? "page" : undefined}
-              >
+                  onClick={() => setMenuOpen(false)}
+                >
                 {label}
               </Link>
             ))}

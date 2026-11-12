@@ -1,8 +1,8 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { getProduct } from "../../../../lib/products";
-import { money } from "../../../../lib/money";
 import AddToCart from "./AddToCart";
+import ProductGallery from "./ProductGallery";
 
 export async function generateMetadata({ params }) {
   const { slug } = await params;
@@ -25,39 +25,29 @@ export default async function ProductPage({ params }) {
     "@type": "Product",
     name: product.name,
     description: product.description,
-    offers: product.variants.map((v) => ({
+    offers: [{
       "@type": "Offer",
-      sku: v.sku,
+      sku: product.sku,
       priceCurrency: "AED",
-      price: (v.priceFils / 100).toFixed(2),
+      price: (product.priceFils / 100).toFixed(2),
       availability:
-        v.stock > 0
+        product.stock > 0
           ? "https://schema.org/InStock"
           : "https://schema.org/OutOfStock",
       url: `${site}/products/${slug}`,
-    })),
+    }],
   };
   return (
     <section className="section product-detail">
       <div className="detail-art">
-        <span>DANUBE MILANO</span>
-        <strong>{product.name}</strong>
+        <ProductGallery images={product.images} name={product.name} />
       </div>
       <div className="detail-copy">
-        <Link href="/" className="back-link">
-          ← All products
-        </Link>
+        <nav className="breadcrumb" aria-label="Breadcrumb"><Link href="/">Home</Link><span>/</span><Link href="/shop">Shop</Link><span>/</span><span>{product.name}</span></nav>
         <p className="eyebrow">BATHROOM ESSENTIALS</p>
         <h1>{product.name}</h1>
-        <p className="lead">{product.description}</p>
-        <p className="price-line">
-          From {money(Math.min(...product.variants.map((v) => v.priceFils)))}
-        </p>
-        <AddToCart variants={product.variants} />
-        <p className="fine-print">
-          Prices are calculated again at checkout. Stock is subject to
-          availability.
-        </p>
+        <div className="lead product-description" dangerouslySetInnerHTML={{ __html: product.description }} />
+        <AddToCart product={product} />
       </div>
       <script
         type="application/ld+json"

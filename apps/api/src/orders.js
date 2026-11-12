@@ -1,7 +1,12 @@
+import { randomBytes } from "node:crypto";
 import { Router } from "express";
 import { pool } from "./db.js";
 import { hashToken } from "./auth.js";
-import { HttpError, id, object, string, webUrl } from "./validation.js";
+import { decryptOrderReference } from "./orderReference.js";
+import { getCustomer } from "./customerAuth.js";
+import { forgetGuestSession, getGuestSession, setGuestCookie } from "./guestSessions.js";
+import { HttpError, email, id, object, string, webUrl } from "./validation.js";
+import { clientAddress, identifierHash, rateLimit } from "./rateLimit.js";
 
 export const ordersRouter = Router();
 export const adminOrders = Router();
@@ -12,15 +17,12 @@ ordersRouter.use((req, res, next) => {
 
 async function orderItems(orderId) {
   const [items] = await pool.execute(
-    `SELECT product_name, variant_key, variant_label, variant_attributes, sku, unit_price_fils, quantity
+    `SELECT product_name, sku, unit_price_fils, quantity
      FROM order_items WHERE order_id = ? ORDER BY id`,
     [orderId],
   );
   return items.map((item) => ({
     productName: item.product_name,
-    variantKey: item.variant_key,
-    variantLabel: item.variant_label,
-    attributes: item.variant_attributes,
     sku: item.sku,
     unitPriceFils: item.unit_price_fils,
     quantity: item.quantity,
@@ -39,9 +41,11 @@ async function orderEvents(orderId) {
   }));
 }
 
-function orderResponse(row, items) {
+function orderResponse(row, items, { internal = false } = {}) {
   return {
-    id: row.id,
+    orderNumber: `DM-${String(row.id).padStart(8, "0")}`,
+    ...(internal ? { id: row.id } : {}),
+    publicId: row.public_id,
     name: row.customer_name,
     email: row.customer_email,
     phone: row.customer_phone,
@@ -59,19 +63,116 @@ function orderResponse(row, items) {
   };
 }
 
-ordersRouter.get("/:id", async (req, res) => {
-  const token = req.get("X-Order-Token");
-  if (!token || !/^[A-Za-z0-9_-]{43}$/.test(token)) {
-    throw new HttpError(404, "NOT_FOUND", "Order confirmation unavailable");
+function orderNumberId(value) {
+  const match = /^DM-(\d{8,10})$/.exec(value);
+  return match ? Number(match[1]) : null;
+}
+
+ordersRouter.get("/", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  const customer = await getCustomer(req);
+  const guest = await getGuestSession(req);
+  if (!customer && !guest) return res.json({ orders: [] });
+  const [rows] = await pool.execute(
+    `SELECT DISTINCT o.id, o.public_id, o.customer_name, o.customer_email, o.customer_phone, o.customer_address,
+       o.currency, o.total_fils, o.status, o.status_updated_at, o.carrier, o.tracking_number, o.tracking_url,
+       o.refund_status, o.created_at
+     FROM orders o LEFT JOIN guest_session_orders gso ON gso.order_id = o.id
+     WHERE o.customer_id = COALESCE(?, 0) OR gso.guest_session_id = COALESCE(?, 0)
+     ORDER BY o.created_at DESC`,
+    [customer?.id || null, guest?.id || null],
+  );
+  res.json({ orders: await Promise.all(rows.map(async (row) => ({
+    orderNumber: `DM-${String(row.id).padStart(8, "0")}`,
+    createdAt: row.created_at,
+    status: row.status,
+    totalFils: row.total_fils,
+    currency: row.currency,
+    productSummary: (await orderItems(row.id)).map((item) => `${item.productName} × ${item.quantity}`).join(", "),
+  }))) });
+});
+
+ordersRouter.post("/forget-device", async (req, res) => {
+  await forgetGuestSession(req, res);
+  res.status(204).end();
+});
+
+ordersRouter.post(
+  "/recover",
+  rateLimit({ name: "recovery-ip", limitEnv: "RATE_LIMIT_RECOVERY_PER_15_MINUTES", fallbackLimit: 5, windowMs: 15 * 60 * 1000, key: (req) => [clientAddress(req)], code: "RATE_LIMITED", message: "Too many recovery requests. Try again later." }),
+  rateLimit({ name: "recovery-email", limitEnv: "RATE_LIMIT_RECOVERY_PER_EMAIL_15_MINUTES", fallbackLimit: 3, windowMs: 15 * 60 * 1000, key: (req) => [clientAddress(req), identifierHash(req.body?.email)], code: "RATE_LIMITED", message: "Too many recovery requests. Try again later." }),
+  async (req, res) => {
+  object(req.body, ["email", "orderNumber"]);
+  const address = email(req.body.email);
+  const number = string(req.body.orderNumber, "Order number", 13);
+  const dbId = orderNumberId(number);
+  if (!process.env.RESEND_API_KEY || !process.env.EMAIL_FROM) throw new HttpError(503, "EMAIL_NOT_CONFIGURED", "Order recovery email is not configured. Current-device order access remains available.");
+  await pool.execute("DELETE FROM order_recovery_tokens WHERE expires_at <= UTC_TIMESTAMP(6) OR used_at IS NOT NULL");
+  let rows = [];
+  if (dbId) [rows] = await pool.execute("SELECT id FROM orders WHERE id = ? AND customer_email = ?", [dbId, address]);
+  if (rows.length) {
+    const token = randomBytes(32).toString("base64url");
+    await pool.execute("INSERT INTO order_recovery_tokens (token_hash, order_id, expires_at) VALUES (?, ?, DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 15 MINUTE))", [hashToken(token), rows[0].id]);
+    const link = `${process.env.WEB_ORIGIN}/orders/recover#${token}`;
+    try {
+      const mail = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ from: process.env.EMAIL_FROM, to: [address], subject: "Verify your Danube Milano order", html: `<p>Use this secure link within 15 minutes to access your order:</p><p><a href="${link}">View your order</a></p>` }),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!mail.ok) console.error("Order recovery email delivery failed", mail.status);
+    } catch { console.error("Order recovery email delivery failed"); }
   }
+  res.status(202).json({ message: "If the order details match, a verification link will be sent to the checkout email." });
+  },
+);
+
+ordersRouter.post(
+  "/recover/verify",
+  rateLimit({ name: "recovery-verify", limitEnv: "RATE_LIMIT_RECOVERY_VERIFY_PER_15_MINUTES", fallbackLimit: 10, windowMs: 15 * 60 * 1000, key: (req) => [clientAddress(req)], code: "RATE_LIMITED", message: "Too many recovery attempts. Try again later." }),
+  async (req, res) => {
+  object(req.body, ["token"]);
+  const token = string(req.body.token, "Verification token", 100);
+  if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new HttpError(400, "INVALID_TOKEN", "Verification link is invalid or expired");
+  const connection = await pool.getConnection();
+  let guest;
+  let orderId;
+  try {
+    await connection.beginTransaction();
+    const [tokens] = await connection.execute("SELECT t.order_id, o.customer_email FROM order_recovery_tokens t JOIN orders o ON o.id = t.order_id WHERE t.token_hash = ? AND t.used_at IS NULL AND t.expires_at > UTC_TIMESTAMP(6) FOR UPDATE", [hashToken(token)]);
+    if (!tokens.length) throw new HttpError(400, "INVALID_TOKEN", "Verification link is invalid or expired");
+    orderId = tokens[0].order_id;
+    guest = await getGuestSession(req, connection, true);
+    await connection.execute("UPDATE order_recovery_tokens SET used_at = UTC_TIMESTAMP(6) WHERE token_hash = ?", [hashToken(token)]);
+    await connection.execute("INSERT IGNORE INTO guest_session_orders (guest_session_id, order_id) SELECT ?, id FROM orders WHERE customer_email = ?", [guest.id, tokens[0].customer_email]);
+    await connection.execute("UPDATE orders o JOIN customers c ON c.email = o.customer_email SET o.customer_id = c.id WHERE o.customer_email = ? AND o.customer_id IS NULL", [tokens[0].customer_email]);
+    await connection.commit();
+  } catch (error) { await connection.rollback(); throw error; }
+  finally { connection.release(); }
+  if (guest?.isNew) setGuestCookie(res, guest.token);
+  res.json({ message: "Order access verified", orderNumber: `DM-${String(orderId).padStart(8, "0")}` });
+  },
+);
+
+ordersRouter.get("/:publicId", async (req, res) => {
+  const orderRef = req.params.publicId;
+  const customer = await getCustomer(req);
+  const guest = await getGuestSession(req);
+  if (!customer && !guest) throw new HttpError(404, "NOT_FOUND", "Order not found");
+  const numberId = orderNumberId(orderRef);
+  const encryptedPublicId = numberId ? null : decryptOrderReference(orderRef);
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(orderRef) ? orderRef : encryptedPublicId;
+  if (!numberId && !uuid) throw new HttpError(404, "NOT_FOUND", "Order not found");
   const [orders] = await pool.execute(
-    `SELECT id, customer_name, customer_email, customer_phone, customer_address, currency, total_fils,
-            status, status_updated_at, carrier, tracking_number, tracking_url, refund_status, created_at
-     FROM orders WHERE id = ? AND confirmation_token_hash = ? AND confirmation_expires_at > UTC_TIMESTAMP(6)`,
-    [id(req.params.id), hashToken(token)],
+    `SELECT DISTINCT o.id, o.public_id, o.customer_name, o.customer_email, o.customer_phone, o.customer_address, o.currency, o.total_fils,
+            o.status, o.status_updated_at, o.carrier, o.tracking_number, o.tracking_url, o.refund_status, o.created_at
+     FROM orders o LEFT JOIN guest_session_orders gso ON gso.order_id = o.id
+     WHERE ${numberId ? "o.id = ?" : "o.public_id = ?"} AND (o.customer_id = COALESCE(?, 0) OR gso.guest_session_id = COALESCE(?, 0))`,
+    [numberId || uuid, customer?.id || null, guest?.id || null],
   );
   if (!orders.length)
-    throw new HttpError(404, "NOT_FOUND", "Order confirmation unavailable");
+    throw new HttpError(404, "NOT_FOUND", "Order not found");
   res.json({
     order: {
       ...orderResponse(orders[0], await orderItems(orders[0].id)),
@@ -89,6 +190,7 @@ adminOrders.get("/", async (req, res) => {
   res.json({
     orders: rows.map((row) => ({
       id: row.id,
+      orderNumber: `DM-${String(row.id).padStart(8, "0")}`,
       name: row.customer_name,
       email: row.customer_email,
       totalFils: row.total_fils,
@@ -102,7 +204,7 @@ adminOrders.get("/", async (req, res) => {
 
 adminOrders.get("/:id", async (req, res) => {
   const [rows] = await pool.execute(
-    `SELECT id, customer_name, customer_email, customer_phone, customer_address, currency, total_fils,
+    `SELECT id, public_id, customer_name, customer_email, customer_phone, customer_address, currency, total_fils,
             status, status_updated_at, carrier, tracking_number, tracking_url,
             refund_status, refund_note, refund_updated_at, created_at
      FROM orders WHERE id = ?`,
@@ -111,7 +213,7 @@ adminOrders.get("/:id", async (req, res) => {
   if (!rows.length) throw new HttpError(404, "NOT_FOUND", "Order not found");
   res.json({
     order: {
-      ...orderResponse(rows[0], await orderItems(rows[0].id)),
+      ...orderResponse(rows[0], await orderItems(rows[0].id), { internal: true }),
       refundNote: rows[0].refund_note,
       refundUpdatedAt: rows[0].refund_updated_at,
       events: await orderEvents(rows[0].id),
@@ -120,7 +222,7 @@ adminOrders.get("/:id", async (req, res) => {
 });
 
 adminOrders.patch("/:id/status", async (req, res) => {
-  object(req.body);
+  object(req.body, ["status", "carrier", "trackingNumber", "trackingUrl"]);
   const status = req.body.status;
   if (!["processing", "shipped", "delivered", "cancelled"].includes(status)) {
     throw new HttpError(400, "INVALID_INPUT", "Invalid order status");
@@ -167,13 +269,13 @@ adminOrders.patch("/:id/status", async (req, res) => {
       }
       if (status === "cancelled") {
         const [items] = await connection.execute(
-          "SELECT variant_id, quantity FROM order_items WHERE order_id = ? ORDER BY variant_id",
+          "SELECT product_id, quantity FROM order_items WHERE order_id = ? ORDER BY product_id",
           [orderId],
         );
         for (const item of items) {
           await connection.execute(
-            "UPDATE product_variants SET stock = stock + ? WHERE id = ?",
-            [item.quantity, item.variant_id],
+            "UPDATE products SET stock = stock + ? WHERE id = ?",
+            [item.quantity, item.product_id],
           );
         }
       }
@@ -213,7 +315,7 @@ adminOrders.patch("/:id/status", async (req, res) => {
 });
 
 adminOrders.post("/:id/refund", async (req, res) => {
-  object(req.body);
+  object(req.body, ["note"]);
   const note = string(req.body.note, "Refund note", 500, 10);
   // shortcut: full-order manual refund records only; add amounts with payment processing.
   const [result] = await pool.execute(
@@ -237,7 +339,7 @@ adminOrders.post("/:id/refund", async (req, res) => {
 });
 
 adminOrders.patch("/:id/refund", async (req, res) => {
-  object(req.body);
+  object(req.body, ["status"]);
   if (req.body.status !== "completed") {
     throw new HttpError(
       400,

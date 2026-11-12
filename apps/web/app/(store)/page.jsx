@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { getProducts } from "../../lib/products";
-import { money } from "../../lib/money";
+import ProductGrid from "./components/ProductGrid";
+import ProductImage from "./components/ProductImage";
 
 export const metadata = { alternates: { canonical: "/" } };
 
@@ -9,19 +10,15 @@ export default async function Home() {
   return (
     <>
       <section className="hero">
-        <p className="eyebrow">SANITARY COLLECTION</p>
-        <h1>
-          Better bathrooms
-          <br />
-          <em>begin here.</em>
-        </h1>
-        <p>
-          Quiet forms, dependable materials, and essentials made for everyday
-          living.
-        </p>
-        <a href="#collection" className="button">
-          Explore collection
-        </a>
+        <div className="hero-copy">
+          <p className="eyebrow">SANITARY COLLECTION</p>
+          <h1>Designed for refined spaces.</h1>
+          <p>Quiet forms, dependable materials, and essentials made for everyday living.</p>
+          <Link href="/shop" className="button">Shop collection</Link>
+        </div>
+        <div className="hero-image">
+          <ProductImage src={products[0]?.imageUrl} alt={products[0]?.name || "Bathroom product"} />
+        </div>
       </section>
       <section id="collection" className="section">
         <div className="section-heading">
@@ -29,34 +26,11 @@ export default async function Home() {
             <p className="eyebrow">THE COLLECTION</p>
             <h2>Considered essentials</h2>
           </div>
-          <p>
-            Three product families, selected for a clean and lasting bathroom.
-          </p>
+          <div className="section-heading-actions">
+            <Link href="/shop" className="button secondary collection-link">Browse the full collection</Link>
+          </div>
         </div>
-        <div className="product-grid">
-          {products.map((product, index) => (
-            <Link
-              className="product-card"
-              href={`/products/${product.slug}`}
-              key={product.id}
-            >
-              <div className={`product-art art-${index + 1}`}>
-                <span>{String(index + 1).padStart(2, "0")}</span>
-                <strong>{product.name.split(" ").slice(-2).join(" ")}</strong>
-              </div>
-              <div className="card-details">
-                <div>
-                  <h3>{product.name}</h3>
-                  <p>{product.variants.length} finishes / sizes</p>
-                </div>
-                <span>
-                  From{" "}
-                  {money(Math.min(...product.variants.map((v) => v.priceFils)))}
-                </span>
-              </div>
-            </Link>
-          ))}
-        </div>
+        <ProductGrid products={products.slice(0, 3)} />
       </section>
     </>
   );

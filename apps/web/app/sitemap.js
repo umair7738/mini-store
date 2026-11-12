@@ -5,6 +5,7 @@ export default async function sitemap() {
   const products = await getProducts();
   return [
     { url: base },
+    { url: `${base}/shop` },
     ...products.map((product) => ({ url: `${base}/products/${product.slug}` })),
   ];
 }

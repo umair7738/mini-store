@@ -32,7 +32,7 @@ export default function AdminOrdersPage() {
   const visibleOrders = orders.filter((order) => {
     if (filter !== "all" && order.status !== filter &&
       !(filter === "refund" && order.refundStatus === "pending")) return false;
-    return `#${order.id} ${order.name} ${order.email}`
+    return `${order.orderNumber} ${order.name} ${order.email}`
       .toLowerCase().includes(query.toLowerCase().trim());
   });
 
@@ -168,7 +168,7 @@ export default function AdminOrdersPage() {
                 aria-pressed={selected?.id === order.id}
                 onClick={() => select(order.id)}
               >
-                <span className="row-between"><strong>#{order.id}</strong><strong>{money(order.totalFils)}</strong></span>
+                <span className="row-between"><strong>{order.orderNumber}</strong><strong>{money(order.totalFils)}</strong></span>
                 <span>{order.name}</span>
                 <small>{order.email}</small>
                 <span className={`status-pill ${order.status}`}>{statusLabel[order.status]}</span>
@@ -182,7 +182,7 @@ export default function AdminOrdersPage() {
         </aside>
         {selected && (
           <div className="order-detail">
-            <p className="eyebrow">ORDER #{selected.id}</p>
+            <p className="eyebrow">ORDER {selected.orderNumber}</p>
             <div className="row-between"><h2>{selected.name}</h2><span className={`status-pill ${selected.status}`}>{statusLabel[selected.status]}</span></div>
             <p className="fine-print">
               Placed {new Date(selected.createdAt).toLocaleString("en-AE")}
@@ -199,7 +199,7 @@ export default function AdminOrdersPage() {
                 <span>
                   {item.productName}
                   <small>
-                    {item.variantLabel} · {item.sku} × {item.quantity}
+                    SKU: {item.sku} × {item.quantity}
                   </small>
                 </span>
                 <strong>{money(item.unitPriceFils * item.quantity)}</strong>

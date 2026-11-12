@@ -8,11 +8,13 @@
     "db:migrate": "node --env-file=.env scripts/migrate.js",
     "db:seed": "node --env-file=.env scripts/seed.js",
     "admin:create": "node --env-file=.env scripts/create-admin.js",
-    "test": "node --env-file=.env.test --test"
+    "test": "node --env-file=.env.test --test --test-concurrency=1"
   },
   "dependencies": {
     "cookie-parser": "^1.4.7",
     "express": "^5.1.0",
-    "mysql2": "^3.15.0"
+    "multer": "^2.5.0",
+    "mysql2": "^3.15.0",
+    "sanitize-html": "^2.18.1"
   }
 }
