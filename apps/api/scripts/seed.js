@@ -9,14 +9,15 @@ const products = [
 try {
   for (const [slug, name, description, imageUrl, sku, priceFils, stock] of products) {
     await pool.execute(
-      `INSERT INTO products (slug, name, description, image_url, sku, price_fils, stock)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO products (slug, name, description, image_url, images, sku, price_fils, stock)
+       VALUES (?, ?, ?, ?, JSON_ARRAY(?), ?, ?, ?)
        ON DUPLICATE KEY UPDATE
-         image_url = COALESCE(image_url, VALUES(image_url)),
+         images = IF(COALESCE(JSON_LENGTH(images), 0) = 0, VALUES(images), IF(JSON_UNQUOTE(JSON_EXTRACT(images, '$[0]')) NOT LIKE '/%', JSON_REPLACE(images, '$[0]', VALUES(image_url)), images)),
+         image_url = IF(image_url IS NULL OR image_url NOT LIKE '/%', VALUES(image_url), image_url),
          sku = IF(price_fils = 0 AND sku REGEXP '^DM-[0-9]+$', VALUES(sku), sku),
          stock = IF(price_fils = 0, VALUES(stock), stock),
          price_fils = IF(price_fils = 0, VALUES(price_fils), price_fils)`,
-      [slug, name, description, imageUrl, sku, priceFils, stock],
+      [slug, name, description, imageUrl, imageUrl, sku, priceFils, stock],
     );
     console.log(`Seeded ${name}`);
   }

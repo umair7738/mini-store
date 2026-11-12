@@ -97,20 +97,22 @@ The first migration targets mini_store_dev. The second migration command targets
 
 The migration runner applies the base schema and checks the order, checkout, public-order-ID, image, and cart-quantity changes. Do not run individual SQL migration files manually.
 
-The seed creates three products with their own SKU, price, and stock. It is safe to rerun: existing product data is kept, and missing image URLs are filled.
+The seed creates three products with their own SKU, price, and stock. It is safe to rerun: existing product data is kept, missing image URLs and image galleries are filled, and old externally hosted primary images are replaced with the bundled local images. Existing local product galleries are kept.
 
 ### 7. Create a local admin
 
-Choose your own email and password. The password must be at least 12 characters.
+For the local development database, `npm run admin:create` creates this demo login:
+
+- Email: `admin@mini-store.local`
+- Password: `MiniStoreDemo2026!`
+
+These published demo credentials are enabled only when `NODE_ENV=development` and `DB_NAME=mini_store_dev`. Do not use them for an internet-facing or production app. To choose your own credentials, set `ADMIN_EMAIL` and `ADMIN_PASSWORD` before running the command; passwords must be at least 12 characters.
 
 ~~~powershell
-$env:ADMIN_EMAIL = Read-Host 'Admin email'
-$env:ADMIN_PASSWORD = Read-Host 'Admin password (12+ characters)'
 npm run admin:create
-Remove-Item Env:ADMIN_EMAIL,Env:ADMIN_PASSWORD -ErrorAction SilentlyContinue
 ~~~
 
-This stores only a salted password hash in MySQL and invalidates previous sessions for that email. Never put the password in Git or in this document.
+This stores only a salted password hash in MySQL and invalidates previous sessions for that email. Never put a custom password in Git or in this document.
 
 ### 8. Run the API and web app
 

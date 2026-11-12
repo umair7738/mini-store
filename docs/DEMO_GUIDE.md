@@ -17,14 +17,13 @@ In a second terminal:
 npm run dev:web
 ```
 
-Create a disposable admin if needed:
+Create the local demo admin if needed:
 
 ```powershell
-$env:ADMIN_EMAIL = "demo-admin@example.com"
-$env:ADMIN_PASSWORD = "use-a-local-password-at-least-12-characters"
 npm run admin:create
-Remove-Item Env:ADMIN_EMAIL,Env:ADMIN_PASSWORD
 ```
+
+Login: `admin@mini-store.local` / `MiniStoreDemo2026!` (local development only).
 
 Open <http://localhost:3000>.
 
