@@ -15,7 +15,7 @@ export function useAdmin() {
 }
 
 const links = [
-  ["/admin", "Overview"],
+  ["/admin", "Dashboard"],
   ["/admin/products", "Products"],
   ["/admin/orders", "Orders"],
 ];
