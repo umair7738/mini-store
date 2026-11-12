@@ -7,7 +7,9 @@ import { pool } from "../src/db.js";
 
 test("dispatch details can be corrected once without changing status", async (t) => {
   const [database] = await pool.query("SELECT DATABASE() AS name");
-  assert.equal(database[0].name, "mini_store_test");
+  assert.equal(process.env.NODE_ENV, "test");
+  assert.equal(database[0].name, process.env.DB_NAME);
+  assert.notEqual(database[0].name, "mini_store_dev");
   const suffix = randomBytes(6).toString("hex");
   const password = randomBytes(16).toString("base64url");
   const salt = randomBytes(16).toString("hex");

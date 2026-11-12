@@ -4,6 +4,11 @@ import { randomBytes } from "node:crypto";
 
 process.env.RATE_LIMIT_CHECKOUT_PER_MINUTE = "100";
 process.env.RATE_LIMIT_CHECKOUT_SESSION_PER_MINUTE = "100";
+process.env.RATE_LIMIT_CUSTOMER_AUTH_PER_MINUTE = "100";
+process.env.RATE_LIMIT_CUSTOMER_AUTH_PER_ACCOUNT_PER_MINUTE = "100";
+process.env.BREVO_API_KEY = "test-brevo-key";
+process.env.EMAIL_FROM = "test@example.com";
+process.env.EMAIL_FROM_NAME = "Test Sender";
 const { app } = await import("../src/server.js");
 const { pool } = await import("../src/db.js");
 const { hashToken } = await import("../src/auth.js");
@@ -24,10 +29,19 @@ function mergeCookies(current, values) {
 }
 
 test("checkout idempotency and concurrency use real database transactions", async (t) => {
+  const realFetch = globalThis.fetch;
+  const sentMail = [];
+  globalThis.fetch = (input, options) => {
+    if (String(input) === "https://api.brevo.com/v3/smtp/email") {
+      sentMail.push({ headers: options.headers, body: JSON.parse(options.body) });
+      return Promise.resolve(new Response(JSON.stringify({ messageId: "<test@brevo>" }), { status: 201, headers: { "Content-Type": "application/json" } }));
+    }
+    return realFetch(input, options);
+  };
   const server = app.listen(0);
   await new Promise((resolve) => server.once("listening", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
-  t.after(async () => { await new Promise((resolve) => server.close(resolve)); await pool.end(); });
+  t.after(async () => { globalThis.fetch = realFetch; await new Promise((resolve) => server.close(resolve)); await pool.end(); });
 
   async function call(path, { method = "GET", body, cookie, csrf } = {}) {
     const headers = {};
@@ -85,6 +99,10 @@ test("checkout idempotency and concurrency use real database transactions", asyn
     return { ...prepared.data, cookie: mergeCookies(cookie, prepared.cookies) };
   }
 
+  function latestVerificationToken() {
+    return sentMail.at(-1)?.body?.htmlContent.match(/#([A-Za-z0-9_-]{43})/)?.[1];
+  }
+
   await t.test("checkout remembers an unverified customer and verification enables sign in", async () => {
     const item = await product(21000, 2);
     const cookie = await cartWithItem(item);
@@ -96,16 +114,26 @@ test("checkout idempotency and concurrency use real database transactions", asyn
     const session = await call("/api/customer/session", { cookie: customerCookie });
     assert.equal(session.data.customer.email, email);
     assert.equal(session.data.customer.verified, false);
+    assert.equal((await call("/api/customer/addresses", { cookie: customerCookie })).status, 403);
     assert.equal((await call("/api/orders", { cookie: customerCookie })).data.orders.length, 1);
-    assert.equal((await call("/api/orders", { cookie })).data.orders.length, 0);
+    assert.equal((await call("/api/orders", { cookie })).data.orders[0].orderNumber, placed.data.orderNumber);
     const replay = await call("/api/checkout", { method: "POST", cookie: customerCookie, body });
     assert.equal(replay.status, 200);
     assert.equal(replay.data.orderId, placed.data.orderId);
-    const token = randomBytes(32).toString("base64url");
-    await pool.execute("INSERT INTO customer_verification_tokens (token_hash, customer_id, expires_at) VALUES (?, ?, DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 1 HOUR))", [hashToken(token), session.data.customer.id]);
+    const registration = await call("/api/customer/register", { method: "POST", cookie: customerCookie, body: { name: "Reliability Buyer", email } });
+    assert.equal(registration.status, 202);
+    assert.equal((await call("/api/customer/session", { cookie: customerCookie })).data.customer.id, session.data.customer.id);
+    const token = latestVerificationToken();
+    assert.ok(token);
     const password = "secure-test-password";
-    assert.equal((await call("/api/customer/verification/confirm", { method: "POST", body: { token, password } })).status, 200);
+    const activated = await call("/api/customer/verification/confirm", { method: "POST", body: { token, password } });
+    assert.equal(activated.status, 200);
     assert.equal((await call("/api/customer/verification/confirm", { method: "POST", body: { token, password } })).status, 400);
+    const oldCustomerCookie = customerCookie.split("; ").find((value) => value.startsWith("mini_customer="));
+    assert.equal((await call("/api/customer/session", { cookie: oldCustomerCookie })).data.customer, null);
+    const activatedCookie = mergeCookies(customerCookie, activated.cookies);
+    assert.equal((await call("/api/customer/session", { cookie: activatedCookie })).data.customer.verified, true);
+    assert.equal((await call("/api/orders", { cookie: activatedCookie })).data.orders[0].orderNumber, placed.data.orderNumber);
     const login = await call("/api/customer/login", { method: "POST", body: { email, password } });
     assert.equal(login.status, 200);
     assert.equal((await call("/api/orders", { cookie: mergeCookies("", login.cookies) })).data.orders[0].orderNumber, placed.data.orderNumber);
@@ -114,8 +142,19 @@ test("checkout idempotency and concurrency use real database transactions", asyn
   await t.test("checkout with an existing email cannot access that customer's orders", async () => {
     const email = `existing-${suffix}@example.com`;
     const password = "secure-test-password";
-    const account = await call("/api/customer/register", { method: "POST", body: { name: "Existing", email, password } });
-    assert.equal(account.status, 201);
+    const registration = await call("/api/customer/register", { method: "POST", body: { name: "Existing", email } });
+    assert.equal(registration.status, 202);
+    const pendingAccountCookie = mergeCookies("", registration.cookies);
+    const pendingAccount = await call("/api/customer/session", { cookie: pendingAccountCookie });
+    assert.equal(pendingAccount.data.customer.verified, false);
+    const activation = await call("/api/customer/verification/confirm", { method: "POST", body: { token: latestVerificationToken(), password } });
+    assert.equal(activation.status, 200);
+    const accountCookie = mergeCookies(pendingAccountCookie, activation.cookies);
+    const account = await call("/api/customer/session", { cookie: accountCookie });
+    assert.equal(account.data.customer.verified, true);
+    const duplicate = await call("/api/customer/register", { method: "POST", body: { name: "Duplicate", email } });
+    assert.equal(duplicate.status, 202);
+    assert.equal(duplicate.data.message, registration.data.message);
     const item = await product(22000, 2);
     const cookie = await cartWithItem(item);
     const placed = await call("/api/checkout", { method: "POST", cookie, body: checkoutBody(item, `existing-${suffix}`, { email }) });
@@ -123,10 +162,39 @@ test("checkout idempotency and concurrency use real database transactions", asyn
     const current = mergeCookies(cookie, placed.cookies);
     const session = await call("/api/customer/session", { cookie: current });
     assert.notEqual(session.data.customer.id, account.data.customer.id);
-    assert.equal((await call("/api/orders", { cookie: mergeCookies("", account.cookies) })).data.orders.length, 0);
+    assert.equal((await call("/api/orders", { cookie: accountCookie })).data.orders.length, 0);
+    const blockedToken = randomBytes(32).toString("base64url");
+    await pool.execute("INSERT INTO customer_verification_tokens (token_hash, customer_id, expires_at) VALUES (?, ?, DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 1 HOUR))", [hashToken(blockedToken), session.data.customer.id]);
+    assert.equal((await call("/api/customer/verification/confirm", { method: "POST", body: { token: blockedToken, password: "cannot-hijack-account" } })).status, 400);
+    const accountLogin = await call("/api/customer/login", { method: "POST", body: { email, password } });
+    assert.equal((await call("/api/orders", { cookie: mergeCookies("", accountLogin.cookies) })).data.orders.length, 0);
     const login = await call("/api/customer/login", { method: "POST", cookie: current, body: { email, password } });
     assert.equal(login.status, 200);
     assert.equal((await call("/api/orders", { cookie: mergeCookies(current, login.cookies) })).data.orders[0].orderNumber, placed.data.orderNumber);
+
+    const otherCookie = await cartWithItem(item);
+    const otherOrder = await call("/api/checkout", { method: "POST", cookie: otherCookie, body: checkoutBody(item, `existing-other-${suffix}`, { email }) });
+    assert.equal(otherOrder.status, 201);
+    const plainLogin = await call("/api/customer/login", { method: "POST", body: { email, password } });
+    assert.deepEqual((await call("/api/orders", { cookie: mergeCookies("", plainLogin.cookies) })).data.orders.map((order) => order.orderNumber), [placed.data.orderNumber]);
+
+    const recoveryToken = randomBytes(32).toString("base64url");
+    await pool.execute("INSERT INTO order_recovery_tokens (token_hash, order_id, expires_at) VALUES (?, ?, DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 15 MINUTE))", [hashToken(recoveryToken), otherOrder.data.orderId]);
+    const recovered = await call("/api/orders/recover/verify", { method: "POST", body: { token: recoveryToken } });
+    assert.equal(recovered.status, 200);
+    const recoveredCookie = mergeCookies("", recovered.cookies);
+    assert.deepEqual((await call("/api/orders", { cookie: recoveredCookie })).data.orders.map((order) => order.orderNumber), [otherOrder.data.orderNumber]);
+    assert.equal((await call(`/api/orders/${placed.data.orderNumber}`, { cookie: recoveredCookie })).status, 404);
+
+    const expiredEmail = `expired-${suffix}@example.com`;
+    const expiredRegistration = await call("/api/customer/register", { method: "POST", body: { name: "Expired", email: expiredEmail } });
+    assert.equal(expiredRegistration.status, 202);
+    const expiredToken = latestVerificationToken();
+    const expiredSession = await call("/api/customer/session", { cookie: mergeCookies("", expiredRegistration.cookies) });
+    await pool.execute("UPDATE customer_verification_tokens SET expires_at = DATE_SUB(UTC_TIMESTAMP(6), INTERVAL 1 SECOND) WHERE customer_id = ?", [expiredSession.data.customer.id]);
+    assert.equal((await call("/api/customer/verification/confirm", { method: "POST", body: { token: expiredToken, password } })).status, 400);
+    const [expiredCustomer] = await pool.execute("SELECT email, pending_email FROM customers WHERE id = ?", [expiredSession.data.customer.id]);
+    assert.deepEqual([expiredCustomer[0].email, expiredCustomer[0].pending_email], [null, expiredEmail]);
   });
 
   await t.test("same-key replay, immutable conflict, and guest ownership", async () => {

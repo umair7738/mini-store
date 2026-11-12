@@ -9,6 +9,9 @@ import { pool } from "../src/db.js";
 import { uploadDir } from "../src/uploads.js";
 
 const suffix = randomBytes(5).toString("hex").toUpperCase();
+process.env.BREVO_API_KEY = "test-brevo-key";
+process.env.EMAIL_FROM = "test@example.com";
+process.env.EMAIL_FROM_NAME = "Test Sender";
 const product = (name, priceFils = 25000, stock = 5) => ({
   slug: `${name}-${suffix}`.toLowerCase(), name,
   description: "<p>A durable product for a modern bathroom.</p>",
@@ -17,13 +20,24 @@ const product = (name, priceFils = 25000, stock = 5) => ({
 });
 
 test("product-only API, cart, checkout and order history", async (t) => {
+  const realFetch = globalThis.fetch;
+  const sentMail = [];
+  globalThis.fetch = (input, options) => {
+    if (String(input) === "https://api.brevo.com/v3/smtp/email") {
+      sentMail.push({ url: String(input), headers: options.headers, body: JSON.parse(options.body) });
+      return Promise.resolve(new Response(JSON.stringify({ messageId: "<test@brevo>" }), { status: 201, headers: { "Content-Type": "application/json" } }));
+    }
+    return realFetch(input, options);
+  };
   const [database] = await pool.query("SELECT DATABASE() AS name, VERSION() AS version");
-  assert.equal(database[0].name, "mini_store_test");
+  assert.equal(process.env.NODE_ENV, "test");
+  assert.equal(database[0].name, process.env.DB_NAME);
+  assert.notEqual(database[0].name, "mini_store_dev");
   assert.match(database[0].version, /^8\.4\./);
   const server = app.listen(0);
   await new Promise((resolve) => server.once("listening", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
-  t.after(async () => { await new Promise((resolve) => server.close(resolve)); await pool.end(); });
+  t.after(async () => { globalThis.fetch = realFetch; await new Promise((resolve) => server.close(resolve)); await pool.end(); });
   async function call(path, { method = "GET", body, cookie, csrf, orderToken } = {}) {
     const headers = {};
     if (method !== "GET") headers.Origin = process.env.WEB_ORIGIN;
@@ -38,6 +52,25 @@ test("product-only API, cart, checkout and order history", async (t) => {
       cookies.set(value.slice(0, value.indexOf("=")), value);
     }
     return { status: response.status, data: response.status === 204 ? null : await response.json(), cookie: [...cookies.values()].join("; ") };
+  }
+  async function registerAndActivate({ name, email, phone, password }) {
+    const registered = await call("/api/customer/register", { method: "POST", body: { name, email, ...(phone && { phone }) } });
+    assert.equal(registered.status, 202);
+    const pending = await call("/api/customer/session", { cookie: registered.cookie });
+    assert.equal(pending.data.customer.verified, false);
+    const sent = sentMail.at(-1);
+    assert.equal(sent.url, "https://api.brevo.com/v3/smtp/email");
+    assert.equal(sent.headers["api-key"], "test-brevo-key");
+    assert.deepEqual(sent.body.sender, { email: "test@example.com", name: "Test Sender" });
+    assert.equal(sent.body.to[0].email.toLowerCase(), email.toLowerCase());
+    assert.equal(sent.body.subject, "Verify your Danube Milano account");
+    const token = sent.body.htmlContent.match(/#([A-Za-z0-9_-]{43})/)?.[1];
+    assert.ok(token);
+    const activated = await call("/api/customer/verification/confirm", { method: "POST", cookie: registered.cookie, body: { token, password } });
+    assert.equal(activated.status, 200);
+    const session = await call("/api/customer/session", { cookie: activated.cookie });
+    assert.equal(session.data.customer.verified, true);
+    return { cookie: activated.cookie, data: { customer: { ...session.data.customer, csrfToken: session.data.csrfToken } } };
   }
   const email = `test-${suffix}@example.com`;
   const password = randomBytes(16).toString("base64url");
@@ -153,10 +186,9 @@ test("product-only API, cart, checkout and order history", async (t) => {
     assert.equal((await call(`/api/orders/${placed.data.orderNumber}`, { cookie: guestOnly })).status, 404);
     assert.equal((await call(`/api/orders/${placed.data.orderNumber}`, { cookie: forgotten.cookie })).status, 200);
     const accountPassword = randomBytes(16).toString("base64url");
-    const account = await call("/api/customer/register", { method: "POST", body: { name: "Test Buyer", email: `buyer-${suffix}@example.com`, phone: "+971 50 123 4567", password: accountPassword } });
-    assert.equal(account.status, 201);
+    const account = await registerAndActivate({ name: "Test Buyer", email: `buyer-${suffix}@example.com`, phone: "+971 50 123 4567", password: accountPassword });
     assert.equal((await call("/api/orders", { cookie: account.cookie })).data.orders.length, 0);
-    const other = await call("/api/customer/register", { method: "POST", body: { name: "Other Buyer", email: `other-${suffix}@example.com`, password: randomBytes(16).toString("base64url") } });
+    const other = await registerAndActivate({ name: "Other Buyer", email: `other-${suffix}@example.com`, password: randomBytes(16).toString("base64url") });
     assert.equal((await call(`/api/orders/${placed.data.orderNumber}`, { cookie: other.cookie })).status, 404);
     const address = await call("/api/customer/addresses", { method: "POST", cookie: account.cookie, csrf: account.data.customer.csrfToken, body: { label: "Home", name: "Test Buyer", phone: "+971 50 123 4567", address: "123 Main Street, Dubai" } });
     assert.equal(address.status, 201);
@@ -165,7 +197,8 @@ test("product-only API, cart, checkout and order history", async (t) => {
     await pool.execute("INSERT INTO order_recovery_tokens (token_hash, order_id, expires_at) VALUES (?, ?, DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 15 MINUTE))", [hashToken(recoveryToken), placed.data.orderId]);
     const verified = await call("/api/orders/recover/verify", { method: "POST", body: { token: recoveryToken } });
     assert.equal(verified.data.orderNumber, placed.data.orderNumber);
-    assert.equal((await call("/api/orders", { cookie: account.cookie })).data.orders.length, 1);
+    assert.equal((await call("/api/orders", { cookie: account.cookie })).data.orders.length, 0);
+    assert.equal((await call("/api/orders", { cookie: verified.cookie })).data.orders[0].orderNumber, placed.data.orderNumber);
     await call(`/api/customer/addresses/${address.data.id}`, { method: "PUT", cookie: account.cookie, csrf: account.data.customer.csrfToken, body: { label: "Apartment", name: "Test Buyer", phone: "+971 50 123 4567", address: "123 Main Street, Dubai" } });
     assert.equal((await call("/api/customer/addresses", { cookie: account.cookie })).data.addresses[0].label, "Apartment");
     const loggedIn = await call("/api/customer/login", { method: "POST", body: { email: `buyer-${suffix}@example.com`, password: "wrong-password" } });
@@ -179,7 +212,7 @@ test("product-only API, cart, checkout and order history", async (t) => {
     assert.equal((await call("/api/orders", { cookie: relogin.cookie })).data.orders.length, 0);
     const signedIn = await call("/api/customer/login", { method: "POST", body: { email: `buyer-${suffix}@example.com`, password: accountPassword } });
     assert.equal((await call("/api/orders", { cookie: signedIn.cookie })).data.orders.length, 1);
-    if (!process.env.RESEND_API_KEY || !process.env.EMAIL_FROM) assert.equal((await call("/api/orders/recover", { method: "POST", body: { orderNumber: placed.data.orderNumber, email: `buyer-${suffix}@example.com` } })).status, 503);
+    if (!process.env.BREVO_API_KEY || !process.env.EMAIL_FROM) assert.equal((await call("/api/orders/recover", { method: "POST", body: { orderNumber: placed.data.orderNumber, email: `buyer-${suffix}@example.com` } })).status, 503);
     await admin(`/api/admin/products/${made.data.id}`, "PUT", { ...product("checkout", 90000, 0), description: "<p>Changed after purchase</p>" });
     const order = await admin(`/api/admin/orders/${placed.data.orderId}`);
     assert.equal(order.data.order.paymentStatus, "unpaid");
@@ -218,8 +251,6 @@ test("product-only API, cart, checkout and order history", async (t) => {
     assert.equal(retainedCart.data.items.length, 1);
     assert.equal(retainedCart.data.items[0].productId, keptItem.data.id);
     assert.equal((await call(`/api/orders/${bought.data.orderNumber}`, { cookie: bought.cookie })).status, 200);
-    assert.equal((await call(`/api/orders/${bought.data.orderNumber}`, { cookie: browserCookies })).status, 404);
-    await pool.execute("UPDATE orders SET customer_id = NULL WHERE id = ?", [bought.data.orderId]);
     assert.equal((await call(`/api/orders/${bought.data.orderNumber}`, { cookie: browserCookies })).status, 200);
     await pool.execute("UPDATE guest_sessions SET expires_at = DATE_SUB(UTC_TIMESTAMP(6), INTERVAL 1 DAY) WHERE token_hash = ?", [hashToken(verified.cookie.split("=")[1])]);
     assert.equal((await call(`/api/orders/${bought.data.orderNumber}`, { cookie: browserCookies })).status, 404);
