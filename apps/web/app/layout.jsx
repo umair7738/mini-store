@@ -1,5 +1,7 @@
 import "./globals.css";
 import Toast from "./Toast";
+import CooldownNotice from "./CooldownNotice";
+import { connection } from "next/server";
 
 export const metadata = {
   metadataBase: new URL(
@@ -12,12 +14,14 @@ export const metadata = {
   description: "Thoughtfully selected sanitary products for modern bathrooms.",
 };
 
-export default function RootLayout({ children }) {
+export default async function RootLayout({ children }) {
+  await connection();
   return (
     <html lang="en" data-scroll-behavior="smooth">
       <body>
         {children}
         <Toast />
+        <CooldownNotice />
       </body>
     </html>
   );

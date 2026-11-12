@@ -1,13 +1,17 @@
 "use client";
 
+import { apiFetch } from "../../../lib/apiFetch";
+
 import Link from "next/link";
 import { useState } from "react";
+import { useCart } from "./CartProvider";
 import { money } from "../../../lib/money";
 import { notify } from "../../Toast";
 import ProductImage from "./ProductImage";
 import StockBadge from "./StockBadge";
 
 export default function ProductCard({ product }) {
+  const { store } = useCart();
   const [busy, setBusy] = useState(false);
   const stock = product.stock;
 
@@ -15,14 +19,7 @@ export default function ProductCard({ product }) {
     if (!product.stock || busy) return;
     setBusy(true);
     try {
-      const response = await fetch("/api/cart/items", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ productId: product.id, quantity: 1 }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.message || "Could not add product");
-      window.dispatchEvent(new Event("cart-updated"));
+      await store.add(product.id, 1);
       notify("Added to cart");
     } catch (error) {
       notify(error.message, "error");

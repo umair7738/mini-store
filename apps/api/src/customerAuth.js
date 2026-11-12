@@ -17,13 +17,13 @@ function passwordMatches(password, stored) {
   const expected = Buffer.from(hex || "", "hex");
   return expected.length === 64 && timingSafeEqual(scryptSync(password, salt, 64), expected);
 }
-function setSession(res, token) { res.cookie(cookieName, token, cookieOptions); }
+export function setSession(res, token) { res.cookie(cookieName, token, cookieOptions); }
 
 export async function getCustomer(req, db = pool) {
   const token = req.cookies?.[cookieName];
   if (!token) return null;
   const [rows] = await db.execute(
-    `SELECT c.id, c.email, c.full_name AS name, c.phone, s.token_hash
+    `SELECT c.id, COALESCE(c.email, c.pending_email) AS email, c.email IS NOT NULL AS verified, c.full_name AS name, c.phone, s.token_hash
      FROM customer_sessions s JOIN customers c ON c.id = s.customer_id
      WHERE s.token_hash = ? AND s.expires_at > UTC_TIMESTAMP(6)`, [hashToken(token)],
   );
@@ -47,10 +47,11 @@ export function requireCustomerCsrf(req, res, next) {
   next();
 }
 
-async function startSession(customer, res) {
+export async function startSession(customer, res, db = pool) {
   const token = randomBytes(32).toString("base64url");
-  await pool.execute("INSERT INTO customer_sessions (token_hash, customer_id, expires_at) VALUES (?, ?, DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 30 DAY))", [hashToken(token), customer.id]);
-  setSession(res, token);
+  await db.execute("INSERT INTO customer_sessions (token_hash, customer_id, expires_at) VALUES (?, ?, DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 30 DAY))", [hashToken(token), customer.id]);
+  if (res) setSession(res, token);
+  else return token;
   return { id: customer.id, email: customer.email, name: customer.full_name, phone: customer.phone, csrfToken: csrf(token) };
 }
 
@@ -80,6 +81,10 @@ customerRouter.post(
   const password = string(req.body.password, "Password", 1024);
   const [rows] = await pool.execute("SELECT id, email, full_name, phone, password_hash FROM customers WHERE email = ?", [address]);
   if (!passwordMatches(password, rows[0]?.password_hash || dummyPasswordHash) || !rows.length) throw new HttpError(401, "INVALID_CREDENTIALS", "Email or password is incorrect");
+  const current = await getCustomer(req);
+  if (current && !current.verified && current.email === address) {
+    await pool.execute("UPDATE orders SET customer_id = ? WHERE customer_id = ?", [rows[0].id, current.id]);
+  }
   if (req.cookies[cookieName]) await pool.execute("DELETE FROM customer_sessions WHERE token_hash = ?", [hashToken(req.cookies[cookieName])]);
   res.json({ customer: await startSession(rows[0], res) });
   },
@@ -88,8 +93,44 @@ customerRouter.post(
 customerRouter.get("/session", async (req, res) => {
   const customer = await getCustomer(req);
   res.set("Cache-Control", "no-store");
-  res.json({ customer: customer ? { id: customer.id, email: customer.email, name: customer.name, phone: customer.phone } : null, csrfToken: customer ? csrf(req.cookies[cookieName]) : null });
+  res.json({ customer: customer ? { id: customer.id, email: customer.email, name: customer.name, phone: customer.phone, verified: !!customer.verified } : null, csrfToken: customer ? csrf(req.cookies[cookieName]) : null });
 });
+
+customerRouter.post("/verification", requireCustomer, requireCustomerCsrf,
+  rateLimit({ name: "customer-verification", limitEnv: "RATE_LIMIT_CUSTOMER_AUTH_PER_MINUTE", fallbackLimit: 8, key: (req) => [clientAddress(req)] }),
+  async (req, res) => {
+    if (req.customer.verified) throw new HttpError(400, "ALREADY_VERIFIED", "Your email is already verified");
+    if (!process.env.RESEND_API_KEY || !process.env.EMAIL_FROM) throw new HttpError(503, "EMAIL_NOT_CONFIGURED", "Email verification is not configured");
+    const token = randomBytes(32).toString("base64url");
+    await pool.execute("DELETE FROM customer_verification_tokens WHERE customer_id = ? OR expires_at <= UTC_TIMESTAMP(6)", [req.customer.id]);
+    await pool.execute("INSERT INTO customer_verification_tokens (token_hash, customer_id, expires_at) VALUES (?, ?, DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 1 HOUR))", [hashToken(token), req.customer.id]);
+    const link = `${process.env.WEB_ORIGIN}/account/verify#${token}`;
+    const mail = await fetch("https://api.resend.com/emails", { method: "POST", headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, "Content-Type": "application/json" }, body: JSON.stringify({ from: process.env.EMAIL_FROM, to: [req.customer.email], subject: "Verify your Danube Milano account", html: `<p>Use this link within one hour to verify your email and set a password:</p><p><a href="${link}">Verify your account</a></p>` }), signal: AbortSignal.timeout(8000) });
+    if (!mail.ok) throw new HttpError(503, "EMAIL_FAILED", "Verification email could not be sent");
+    res.json({ message: "Check your email for a verification link." });
+  });
+
+customerRouter.post("/verification/confirm",
+  rateLimit({ name: "customer-verification-confirm", limitEnv: "RATE_LIMIT_CUSTOMER_AUTH_PER_MINUTE", fallbackLimit: 8, key: (req) => [clientAddress(req)] }),
+  async (req, res) => {
+    object(req.body, ["token", "password"]);
+    const token = string(req.body.token, "Verification token", 100);
+    const password = string(req.body.password, "Password", 1024, 10);
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new HttpError(400, "INVALID_TOKEN", "Verification link is invalid or expired");
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [rows] = await connection.execute("SELECT c.id, c.pending_email FROM customer_verification_tokens t JOIN customers c ON c.id = t.customer_id WHERE t.token_hash = ? AND t.expires_at > UTC_TIMESTAMP(6) AND c.email IS NULL FOR UPDATE", [hashToken(token)]);
+      if (!rows.length) throw new HttpError(400, "INVALID_TOKEN", "Verification link is invalid or expired");
+      const [existing] = await connection.execute("SELECT id FROM customers WHERE email = ?", [rows[0].pending_email]);
+      if (existing.length) throw new HttpError(409, "EMAIL_REGISTERED", "An account already exists for this email. Sign in on your checkout device to add this order.");
+      await connection.execute("UPDATE customers SET email = pending_email, pending_email = NULL, password_hash = ? WHERE id = ?", [passwordHash(password), rows[0].id]);
+      await connection.execute("DELETE FROM customer_verification_tokens WHERE customer_id = ?", [rows[0].id]);
+      await connection.commit();
+    } catch (error) { await connection.rollback(); throw error; }
+    finally { connection.release(); }
+    res.json({ message: "Email verified. You can now sign in." });
+  });
 
 customerRouter.post("/logout", requireCustomer, requireCustomerCsrf, async (req, res) => {
   await pool.execute("DELETE FROM customer_sessions WHERE token_hash = ?", [hashToken(req.customerToken)]);

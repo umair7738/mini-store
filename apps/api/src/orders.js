@@ -58,7 +58,6 @@ function orderResponse(row, items, { internal = false } = {}) {
     carrier: row.carrier,
     trackingNumber: row.tracking_number,
     trackingUrl: row.tracking_url,
-    refundStatus: row.refund_status,
     createdAt: row.created_at,
     items,
   };
@@ -77,9 +76,9 @@ ordersRouter.get("/", async (req, res) => {
   const [rows] = await pool.execute(
     `SELECT DISTINCT o.id, o.public_id, o.customer_name, o.customer_email, o.customer_phone, o.customer_address,
        o.currency, o.total_fils, o.status, o.status_updated_at, o.carrier, o.tracking_number, o.tracking_url,
-       o.refund_status, o.created_at
+       o.created_at
      FROM orders o LEFT JOIN guest_session_orders gso ON gso.order_id = o.id
-     WHERE o.customer_id = COALESCE(?, 0) OR gso.guest_session_id = COALESCE(?, 0)
+     WHERE o.customer_id = COALESCE(?, 0) OR (o.customer_id IS NULL AND gso.guest_session_id = COALESCE(?, 0))
      ORDER BY o.created_at DESC`,
     [customer?.id || null, guest?.id || null],
   );
@@ -167,9 +166,9 @@ ordersRouter.get("/:publicId", async (req, res) => {
   if (!numberId && !uuid) throw new HttpError(404, "NOT_FOUND", "Order not found");
   const [orders] = await pool.execute(
     `SELECT DISTINCT o.id, o.public_id, o.customer_name, o.customer_email, o.customer_phone, o.customer_address, o.currency, o.total_fils,
-            o.status, o.status_updated_at, o.carrier, o.tracking_number, o.tracking_url, o.refund_status, o.created_at
+            o.status, o.status_updated_at, o.carrier, o.tracking_number, o.tracking_url, o.created_at
      FROM orders o LEFT JOIN guest_session_orders gso ON gso.order_id = o.id
-     WHERE ${numberId ? "o.id = ?" : "o.public_id = ?"} AND (o.customer_id = COALESCE(?, 0) OR gso.guest_session_id = COALESCE(?, 0))`,
+     WHERE ${numberId ? "o.id = ?" : "o.public_id = ?"} AND (o.customer_id = COALESCE(?, 0) OR (o.customer_id IS NULL AND gso.guest_session_id = COALESCE(?, 0)))`,
     [numberId || uuid, customer?.id || null, guest?.id || null],
   );
   if (!orders.length)
@@ -190,11 +189,10 @@ adminOrders.get("/", async (req, res) => {
   if (req.query.page !== undefined) {
     const { page, search, size } = pagination(req.query);
     const status = req.query.status || "all";
-    if (!["all", "placed", "processing", "shipped", "delivered", "completed", "cancelled", "refund"].includes(status)) throw new HttpError(400, "INVALID_INPUT", "Invalid order status");
+    if (!["all", "placed", "processing", "shipped", "delivered", "completed", "cancelled"].includes(status)) throw new HttpError(400, "INVALID_INPUT", "Invalid order status");
     where = `WHERE (LOCATE(?, CONCAT('DM-', LPAD(id, GREATEST(8, LENGTH(id)), '0'))) > 0 OR LOCATE(?, customer_name) > 0 OR LOCATE(?, customer_email) > 0)`;
     params = [search, search, search];
-    if (status === "refund") where += " AND refund_status = 'pending'";
-    else if (status !== "all") { where += " AND status = ?"; params.push(status); }
+    if (status !== "all") { where += " AND status = ?"; params.push(status); }
     const [counts] = await pool.execute(`SELECT COUNT(*) AS total FROM orders ${where}`, params);
     const total = counts[0].total;
     const currentPage = Math.min(page, Math.max(1, Math.ceil(total / size)));
@@ -204,7 +202,7 @@ adminOrders.get("/", async (req, res) => {
   }
   const [rows] = await pool.execute(
     `SELECT id, customer_name, customer_email, total_fils, currency, status,
-            refund_status, payment_status, created_at FROM orders ${where} ORDER BY id DESC ${limit}`,
+            payment_status, created_at FROM orders ${where} ORDER BY id DESC ${limit}`,
     params,
   );
   res.json({
@@ -216,7 +214,6 @@ adminOrders.get("/", async (req, res) => {
       totalFils: row.total_fils,
       currency: row.currency,
       status: row.status,
-      refundStatus: row.refund_status,
       paymentStatus: row.payment_status,
       createdAt: row.created_at,
     })),
@@ -227,7 +224,7 @@ adminOrders.get("/:id", async (req, res) => {
   const [rows] = await pool.execute(
     `SELECT id, public_id, customer_name, customer_email, customer_phone, customer_address, currency, total_fils,
             status, status_updated_at, carrier, tracking_number, tracking_url,
-            refund_status, refund_note, refund_updated_at, payment_status, created_at
+            payment_status, created_at
      FROM orders WHERE id = ?`,
     [id(req.params.id)],
   );
@@ -236,8 +233,6 @@ adminOrders.get("/:id", async (req, res) => {
     order: {
       ...orderResponse(rows[0], await orderItems(rows[0].id), { internal: true }),
       paymentStatus: rows[0].payment_status,
-      refundNote: rows[0].refund_note,
-      refundUpdatedAt: rows[0].refund_updated_at,
       events: await orderEvents(rows[0].id),
     },
   });
@@ -336,6 +331,43 @@ adminOrders.patch("/:id/status", async (req, res) => {
   }
 });
 
+adminOrders.patch("/:id/tracking", async (req, res) => {
+  object(req.body, ["carrier", "trackingNumber", "trackingUrl"]);
+  const carrier = string(req.body.carrier, "Carrier", 80);
+  const trackingNumber = string(req.body.trackingNumber, "Tracking number", 120);
+  const trackingUrl = req.body.trackingUrl == null || req.body.trackingUrl === ""
+    ? null
+    : webUrl(req.body.trackingUrl, "Tracking link");
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const orderId = id(req.params.id);
+    const [rows] = await connection.execute(
+      "SELECT status, carrier, tracking_number, tracking_url FROM orders WHERE id = ? FOR UPDATE",
+      [orderId],
+    );
+    if (!rows.length) throw new HttpError(404, "NOT_FOUND", "Order not found");
+    if (rows[0].status !== "shipped") throw new HttpError(409, "INVALID_STATUS", "Dispatch details can only be corrected while the order is dispatched");
+    if (rows[0].carrier !== carrier || rows[0].tracking_number !== trackingNumber || rows[0].tracking_url !== trackingUrl) {
+      await connection.execute(
+        "UPDATE orders SET carrier = ?, tracking_number = ?, tracking_url = ? WHERE id = ?",
+        [carrier, trackingNumber, trackingUrl, orderId],
+      );
+      await connection.execute(
+        "INSERT INTO order_events (order_id, event_type, message) VALUES (?, 'tracking_corrected', 'Dispatch details corrected')",
+        [orderId],
+      );
+    }
+    await connection.commit();
+    res.json({ carrier, trackingNumber, trackingUrl });
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+});
+
 adminOrders.patch("/:id/payment-status", async (req, res) => {
   object(req.body, ["status"]);
   if (!["paid", "unpaid"].includes(req.body.status)) {
@@ -347,55 +379,4 @@ adminOrders.patch("/:id/payment-status", async (req, res) => {
   );
   if (!result.affectedRows) throw new HttpError(404, "NOT_FOUND", "Order not found");
   res.json({ paymentStatus: req.body.status });
-});
-
-adminOrders.post("/:id/refund", async (req, res) => {
-  object(req.body, ["note"]);
-  const note = string(req.body.note, "Refund note", 500, 10);
-  // shortcut: full-order manual refund records only; add amounts with payment processing.
-  const [result] = await pool.execute(
-    `UPDATE orders SET refund_status = 'pending', refund_note = ?, refund_updated_at = UTC_TIMESTAMP(6)
-     WHERE id = ? AND status IN ('delivered', 'completed', 'cancelled') AND refund_status = 'none'`,
-    [note, id(req.params.id)],
-  );
-  if (!result.affectedRows) {
-    const [rows] = await pool.execute("SELECT id FROM orders WHERE id = ?", [
-      id(req.params.id),
-    ]);
-    throw new HttpError(
-      rows.length ? 409 : 404,
-      rows.length ? "INVALID_REFUND" : "NOT_FOUND",
-      rows.length
-        ? "Refund cannot be requested for this order"
-        : "Order not found",
-    );
-  }
-  res.status(201).json({ refundStatus: "pending" });
-});
-
-adminOrders.patch("/:id/refund", async (req, res) => {
-  object(req.body, ["status"]);
-  if (req.body.status !== "completed") {
-    throw new HttpError(
-      400,
-      "INVALID_INPUT",
-      "Refund status must be completed",
-    );
-  }
-  const [result] = await pool.execute(
-    `UPDATE orders SET refund_status = 'completed', refund_updated_at = UTC_TIMESTAMP(6)
-     WHERE id = ? AND refund_status = 'pending'`,
-    [id(req.params.id)],
-  );
-  if (!result.affectedRows) {
-    const [rows] = await pool.execute("SELECT id FROM orders WHERE id = ?", [
-      id(req.params.id),
-    ]);
-    throw new HttpError(
-      rows.length ? 409 : 404,
-      rows.length ? "INVALID_REFUND" : "NOT_FOUND",
-      rows.length ? "No pending refund for this order" : "Order not found",
-    );
-  }
-  res.json({ refundStatus: "completed" });
 });

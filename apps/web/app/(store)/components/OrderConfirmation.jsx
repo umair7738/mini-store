@@ -1,8 +1,11 @@
 "use client";
 
+import { apiFetch } from "../../../lib/apiFetch";
+
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { money } from "../../../lib/money";
+import { formatDate } from "../../../lib/dates";
 
 const progress = [["placed", "Order placed"], ["processing", "Preparing"], ["shipped", "Dispatched"], ["delivered", "Delivered"]];
 
@@ -20,7 +23,7 @@ export default function OrderConfirmation({ orderId }) {
       setError("This confirmation is unavailable.");
       return;
     }
-    fetch(`/api/orders/${encodeURIComponent(orderId)}`, { cache: "no-store" })
+    apiFetch(`/api/orders/${encodeURIComponent(orderId)}`, { cache: "no-store" })
       .then(async (response) => {
         if (!response.ok) throw new Error("This confirmation is invalid or has expired.");
         return response.json();
@@ -45,7 +48,7 @@ export default function OrderConfirmation({ orderId }) {
           )}
           <div className="summary">
             <h2>Order {order.orderNumber}</h2>
-            <p>Placed {new Date(order.createdAt).toLocaleString("en-AE")}</p>
+            <p>Placed {formatDate(order.createdAt, { dateStyle: "short", timeStyle: "short" })}</p>
             {order.items.map((item, index) => <div className="summary-line" key={index}><span>{item.productName}<small>SKU: {item.sku} × {item.quantity}</small></span><strong>{money(item.unitPriceFils * item.quantity)}</strong></div>)}
             <div className="summary-total"><span>Total</span><strong>{money(order.totalFils)}</strong></div>
           </div>

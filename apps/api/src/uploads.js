@@ -4,40 +4,49 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Router } from "express";
 import multer from "multer";
+import sharp from "sharp";
 import { HttpError } from "./validation.js";
 
 export const uploadsRouter = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { files: 8, fileSize: 8 * 1024 * 1024 } });
 export const uploadDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../..", "web", "public", "uploads", "products");
 
-function imageType(buffer) {
-  if (buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return "png";
-  if (buffer[0] === 255 && buffer[1] === 216 && buffer[2] === 255) return "jpg";
-  if (buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP") return "webp";
-  return null;
-}
+let activeUploads = 0;
 
-uploadsRouter.post("/images", (req, res, next) => upload.array("images", 8)(req, res, (error) => {
-  if (error) return next(new HttpError(400, "INVALID_UPLOAD", "Upload up to 8 images, each no larger than 8 MB"));
+uploadsRouter.post("/images", (req, res, next) => {
+  if (!req.is("multipart/form-data")) return next(new HttpError(415, "INVALID_UPLOAD", "Use a multipart image upload"));
+  if (activeUploads >= 2) { res.set("Retry-After", "5"); return next(new HttpError(429, "UPLOAD_BUSY", "Uploads are busy. Try again shortly.")); }
+  activeUploads += 1;
+  // Keep the slot until parsing/processing finishes, even if the client disconnects.
+  req.releaseUpload = () => { activeUploads -= 1; };
+  next();
+}, (req, res, next) => upload.array("images", 8)(req, res, (error) => {
+  if (error) { req.releaseUpload(); return next(new HttpError(error.code === "LIMIT_FILE_SIZE" ? 413 : 400, "INVALID_UPLOAD", "Upload up to 8 images, each no larger than 8 MB")); }
   next();
 }), async (req, res) => {
-  if (!req.files?.length) throw new HttpError(400, "INVALID_UPLOAD", "Choose at least one image");
-  await mkdir(uploadDir, { recursive: true });
   const images = [];
   const written = [];
   try {
+    if (!req.files?.length) throw new HttpError(400, "INVALID_UPLOAD", "Choose at least one image");
+    await mkdir(uploadDir, { recursive: true });
     for (const file of req.files) {
-      const extension = imageType(file.buffer);
-      if (!extension) throw new HttpError(400, "INVALID_UPLOAD", "Use PNG, JPEG, or WebP image files");
+      let buffer, extension;
+      try {
+        const image = sharp(file.buffer, { limitInputPixels: 20_000_000, failOn: "warning" });
+        const metadata = await image.metadata();
+        if (!["png", "jpeg", "webp"].includes(metadata.format) || (metadata.pages || 1) > 1) throw new Error("Unsupported image");
+        extension = metadata.format === "jpeg" ? "jpg" : metadata.format;
+        buffer = await image.rotate().toFormat(metadata.format).toBuffer();
+      } catch { throw new HttpError(400, "INVALID_UPLOAD", "Use valid PNG, JPEG, or WebP images up to 20 million pixels"); }
       const filename = `${randomUUID()}.${extension}`;
       const filePath = resolve(uploadDir, filename);
-      await writeFile(filePath, file.buffer, { flag: "wx" });
+      await writeFile(filePath, buffer, { flag: "wx" });
       written.push(filePath);
       images.push(`/uploads/products/${filename}`);
     }
   } catch (error) {
     await Promise.allSettled(written.map((filePath) => unlink(filePath)));
     throw error;
-  }
+  } finally { req.releaseUpload(); }
   res.status(201).json({ images });
 });

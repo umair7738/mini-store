@@ -3,7 +3,7 @@ import { Router } from "express";
 import { pool } from "./db.js";
 import { getCart } from "./cart.js";
 import { hashToken } from "./auth.js";
-import { getCustomer } from "./customerAuth.js";
+import { getCustomer, setSession, startSession } from "./customerAuth.js";
 import { getGuestSession, setGuestCookie } from "./guestSessions.js";
 import { HttpError, email, id, integer, object, phone, string } from "./validation.js";
 
@@ -115,7 +115,7 @@ async function findCartOrder(db, cartId) {
 }
 
 async function orderBelongsToPrincipal(db, order, customer, guest) {
-  if (customer) return customer.id === order.customer_id;
+  if (customer && customer.id === order.customer_id) return true;
   if (!guest) return false;
   const [rows] = await db.execute(
     "SELECT 1 FROM guest_session_orders WHERE guest_session_id = ? AND order_id = ?",
@@ -149,8 +149,15 @@ function attemptMatchesInput(attempt, input, mode, buyNow) {
     && saved[0].quantity === buyNow.quantity;
 }
 
-function replayResponse(order, res) {
+async function replayResponse(order, res, req) {
   if (!order) throw new HttpError(500, "CHECKOUT_STATE_UNCERTAIN", errorMessage("CHECKOUT_STATE_UNCERTAIN"));
+  if (req && !await getCustomer(req)) {
+    const guest = await getGuestSession(req);
+    if (guest) {
+      const [rows] = await pool.execute("SELECT c.id FROM customers c JOIN orders o ON o.customer_id = c.id JOIN guest_session_orders g ON g.order_id = o.id WHERE o.id = ? AND g.guest_session_id = ? AND c.email IS NULL", [order.id, guest.id]);
+      if (rows.length) await startSession(rows[0], res);
+    }
+  }
   return res.status(200).json({
     orderId: order.id,
     orderNumber: `DM-${String(order.id).padStart(8, "0")}`,
@@ -186,7 +193,7 @@ async function reserveAttempt(req, res, input, mode, buyNow) {
     await connection.beginTransaction();
     await cleanupAttempts(connection);
     const customer = await getCustomer(req, connection);
-    let guest = customer ? null : await getGuestSession(req, connection, false);
+    let guest = await getGuestSession(req, connection, false);
     const attempt = await findAttempt(connection, input.idempotencyKey, true);
 
     if (attempt) {
@@ -268,6 +275,7 @@ async function reserveAttempt(req, res, input, mode, buyNow) {
     if (!cartItems.length) throw new HttpError(400, "CART_EMPTY", "Add a product before checkout");
     if (cartItems.some((item) => item.quantity > 20)) throw new HttpError(409, "QUANTITY_LIMIT", "Update cart quantities to 20 or less before checkout");
     if (!customer) guest = await getGuestSession(req, connection, true);
+    else guest = null;
     validateAttemptPrincipal({ customerId: customer?.id, guestSessionId: guest?.id });
     const claimToken = randomBytes(32).toString("base64url");
     const [created] = await connection.execute(
@@ -306,8 +314,8 @@ async function executeAttempt(req, res, input, prepared) {
     const attempt = attemptRows[0];
     if (!attempt || !sameBytes(attempt.claim_hash, hashToken(prepared.claimToken))) throw new HttpError(409, "CHECKOUT_IN_PROGRESS", errorMessage("CHECKOUT_IN_PROGRESS"));
     const customer = await getCustomer(req, connection);
-    const currentGuest = customer ? null : await getGuestSession(req, connection, false);
-    const guest = currentGuest || (prepared.guest?.isNew ? prepared.guest : null);
+    const currentGuest = await getGuestSession(req, connection, false);
+    const guest = attempt.guest_session_id ? (currentGuest || (prepared.guest?.isNew ? prepared.guest : null)) : null;
     if (!principalMatches(attempt, customer, guest)) throw new HttpError(409, "IDEMPOTENCY_CONFLICT", errorMessage("IDEMPOTENCY_CONFLICT"));
     await connection.execute("UPDATE checkout_idempotency_keys SET status = 'processing', claim_hash = NULL, lease_until = NULL WHERE id = ?", [attempt.id]);
 
@@ -320,7 +328,7 @@ async function executeAttempt(req, res, input, prepared) {
         if (existing) {
           await connection.execute("UPDATE checkout_idempotency_keys SET status = 'completed', order_id = ? WHERE id = ?", [existing.id, attempt.id]);
           await connection.commit();
-          return replayResponse(existing, res);
+          return replayResponse(existing, res, req);
         }
         const code = !carts.length ? "CART_CHANGED" : carts[0].status === "checked_out" ? "CART_ALREADY_CHECKED_OUT" : "CART_EXPIRED";
         throw new HttpError(409, code, errorMessage(code));
@@ -348,12 +356,19 @@ async function executeAttempt(req, res, input, prepared) {
       if (!updated.affectedRows) throw new HttpError(409, "INSUFFICIENT_STOCK", errorMessage("INSUFFICIENT_STOCK"));
     }
 
+    let orderCustomer = customer;
+    let customerToken;
+    if (!orderCustomer) {
+      const [created] = await connection.execute("INSERT INTO customers (email, pending_email, password_hash, full_name, phone) VALUES (NULL, ?, ?, ?, ?)", [input.email, `${randomBytes(16).toString("hex")}:${randomBytes(64).toString("hex")}`, input.name, input.phone]);
+      orderCustomer = { id: created.insertId };
+      customerToken = await startSession(orderCustomer, null, connection);
+    }
     const publicId = randomUUID();
     const [order] = await connection.execute(
       `INSERT INTO orders (public_id, customer_id, cart_id, customer_name, customer_email, customer_phone, customer_address,
                            total_fils, idempotency_key, confirmation_token_hash, confirmation_expires_at, payment_status)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 24 HOUR), 'unpaid')`,
-      [publicId, customer?.id || null, cart.id, input.name, input.email, input.phone, input.address, totalFils, input.idempotencyKey, hashToken(randomBytes(32).toString("base64url"))],
+      [publicId, orderCustomer.id, cart.id, input.name, input.email, input.phone, input.address, totalFils, input.idempotencyKey, hashToken(randomBytes(32).toString("base64url"))],
     );
     for (const item of orderItems) await connection.execute("INSERT INTO order_items (order_id, product_id, product_name, sku, unit_price_fils, quantity) VALUES (?, ?, ?, ?, ?, ?)", [order.insertId, item.id, item.product_name, item.sku, item.price_fils, item.quantity]);
     if (guest) await connection.execute("INSERT INTO guest_session_orders (guest_session_id, order_id) VALUES (?, ?)", [guest.id, order.insertId]);
@@ -362,6 +377,7 @@ async function executeAttempt(req, res, input, prepared) {
     if (attempt.mode === "cart") await connection.execute("DELETE FROM cart_items WHERE cart_id = ?", [cart.id]);
     await connection.execute("UPDATE checkout_idempotency_keys SET status = 'completed', order_id = ?, claim_hash = NULL, lease_until = NULL WHERE id = ?", [order.insertId, attempt.id]);
     await connection.commit();
+    if (customerToken) setSession(res, customerToken);
     res.status(201).json({ orderId: order.insertId, orderNumber: `DM-${String(order.insertId).padStart(8, "0")}`, publicId, totalFils });
   } catch (error) {
     await connection.rollback().catch(() => {});
@@ -369,7 +385,7 @@ async function executeAttempt(req, res, input, prepared) {
       const committed = await findOrder(pool, { order_id: null, idempotency_key: input.idempotencyKey });
       if (committed) {
         await pool.execute("UPDATE checkout_idempotency_keys SET status = 'completed', order_id = ?, claim_hash = NULL, lease_until = NULL WHERE id = ?", [committed.id, prepared.attempt.id]);
-        return replayResponse(committed, res);
+        return replayResponse(committed, res, req);
       }
       const cartOrder = await findCartOrder(pool, prepared.attempt.cart_id);
       error = cartOrder
@@ -400,6 +416,6 @@ checkoutRouter.post("/", async (req, res) => {
   const normalizedBuyNow = buyNow === undefined ? null : { productId: id(buyNow.productId), quantity: integer(buyNow.quantity, "Quantity", 1, 20) };
   const input = { name, email: customerEmail, phone: customerPhone, address, expectedTotalFils, idempotencyKey };
   const prepared = await reserveAttempt(req, res, input, mode, normalizedBuyNow);
-  if (prepared.replay) return replayResponse(prepared.replay, res);
+  if (prepared.replay) return replayResponse(prepared.replay, res, req);
   return executeAttempt(req, res, input, prepared);
 });

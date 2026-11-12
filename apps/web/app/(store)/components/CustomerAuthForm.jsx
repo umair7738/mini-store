@@ -1,5 +1,7 @@
 "use client";
 
+import { apiFetch } from "../../../lib/apiFetch";
+
 import Link from "next/link";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
@@ -12,7 +14,7 @@ export default function CustomerAuthForm({ register = false, next = "/account" }
   async function submit(event) {
     event.preventDefault(); setBusy(true); setError("");
     try {
-      const response = await fetch(`/api/customer/${register ? "register" : "login"}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
+      const response = await apiFetch(`/api/customer/${register ? "register" : "login"}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message || "Could not complete account request");
       router.replace(next.startsWith("/") && !next.startsWith("//") ? next : "/account");

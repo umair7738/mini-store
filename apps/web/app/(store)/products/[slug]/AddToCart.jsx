@@ -1,14 +1,18 @@
 "use client";
 
+import { apiFetch } from "../../../../lib/apiFetch";
+
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useCart } from "../../components/CartProvider";
 import { money } from "../../../../lib/money";
 import { usePending } from "../../../usePending";
 import { notify } from "../../../Toast";
 
 export default function AddToCart({ product }) {
   const router = useRouter();
+  const { store } = useCart();
   const [busy, run] = usePending();
   const [navigating, setNavigating] = useState(false);
   const [quantity, setQuantity] = useState(1);
@@ -23,11 +27,8 @@ export default function AddToCart({ product }) {
       return;
     }
     try {
-      const response = await fetch("/api/cart/items", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ productId: product.id, quantity }) });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.message || "Could not add product");
+      await store.add(product.id, quantity);
       setMessage("Added to cart.");
-      window.dispatchEvent(new Event("cart-updated"));
       notify("Added to cart");
     } catch (error) { notify(error.message, "error"); }
   }

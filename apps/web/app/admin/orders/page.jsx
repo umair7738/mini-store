@@ -31,14 +31,14 @@ export default function AdminOrdersPage() {
     {error && <p className="notice error" role="alert">{error} <button className="text-button" onClick={() => setReload(reload + 1)}>Retry</button></p>}
     <div className="product-table-toolbar order-table-toolbar">
       <label>Search orders<input type="search" maxLength="254" value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="Order number, name, or email" /></label>
-      <label>Status<select value={filter} onChange={(event) => { setFilter(event.target.value); setPage(1); }}><option value="all">All orders</option>{Object.entries(statusLabel).map(([value, label]) => <option key={value} value={value}>{label}</option>)}<option value="refund">Pending refund</option></select></label>
+      <label>Status<select value={filter} onChange={(event) => { setFilter(event.target.value); setPage(1); }}><option value="all">All orders</option>{Object.entries(statusLabel).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
       <span>{total} orders</span>
     </div>
     <div className="product-admin-list">
       {loading ? <p className="admin-empty" role="status">Loading orders…</p> : orders.length ? orders.map((order) => <article className="order-admin-row" key={order.id}>
         <div className="product-admin-info"><strong>{order.orderNumber}</strong><small>{order.name} · {order.email}</small></div>
         <strong className="order-admin-total">{money(order.totalFils)}</strong>
-        <div><span className={`status-pill ${order.status}`}>{statusLabel[order.status]}</span>{order.refundStatus === "pending" && <small className="order-refund-label">Refund pending</small>}</div>
+        <span className={`status-pill ${order.status}`}>{statusLabel[order.status]}</span>
         <span className="order-payment">Payment: {paymentLabel[order.paymentStatus]}</span>
         <div className="order-admin-actions"><Link className="product-icon-action" href={`/admin/orders/${order.id}`} aria-label={`Show ${order.orderNumber}`} title="Show order"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.2-5 9.5-5 9.5 5 9.5 5-3.2 5-9.5 5-9.5-5-9.5-5Z" /><circle cx="12" cy="12" r="2.5" /></svg></Link><Link className="product-icon-action" href={`/admin/orders/${order.id}/edit`} aria-label={`Edit ${order.orderNumber}`} title="Edit order"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 16.5-.8 3.8 3.8-.8L18.5 8a2.1 2.1 0 0 0-3-3L4 16.5ZM14.5 6.5l3 3" /></svg></Link></div>
       </article>) : <p className="admin-empty">{error ? "Orders could not be loaded." : query || filter !== "all" ? "No matching orders." : "No orders yet."}</p>}

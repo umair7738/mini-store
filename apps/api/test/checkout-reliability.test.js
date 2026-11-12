@@ -29,11 +29,12 @@ test("checkout idempotency and concurrency use real database transactions", asyn
   const base = `http://127.0.0.1:${server.address().port}`;
   t.after(async () => { await new Promise((resolve) => server.close(resolve)); await pool.end(); });
 
-  async function call(path, { method = "GET", body, cookie } = {}) {
+  async function call(path, { method = "GET", body, cookie, csrf } = {}) {
     const headers = {};
     if (method !== "GET") headers.Origin = process.env.WEB_ORIGIN;
     if (body) headers["Content-Type"] = "application/json";
     if (cookie) headers.Cookie = cookie;
+    if (csrf) headers["X-CSRF-Token"] = csrf;
     const response = await fetch(base + path, { method, headers, ...(body && { body: JSON.stringify(body) }) });
     return {
       status: response.status,
@@ -77,6 +78,50 @@ test("checkout idempotency and concurrency use real database transactions", asyn
     const [rows] = await pool.execute("SELECT stock FROM products WHERE id = ?", [item.id]);
     return rows[0].stock;
   }
+
+  await t.test("checkout remembers an unverified customer and verification enables sign in", async () => {
+    const item = await product(21000, 2);
+    const cookie = await cartWithItem(item);
+    const email = `verify-${suffix}@example.com`;
+    const body = checkoutBody(item, `verify-${suffix}`, { email });
+    const placed = await call("/api/checkout", { method: "POST", cookie, body });
+    assert.equal(placed.status, 201);
+    const customerCookie = mergeCookies(cookie, placed.cookies);
+    const session = await call("/api/customer/session", { cookie: customerCookie });
+    assert.equal(session.data.customer.email, email);
+    assert.equal(session.data.customer.verified, false);
+    assert.equal((await call("/api/orders", { cookie: customerCookie })).data.orders.length, 1);
+    assert.equal((await call("/api/orders", { cookie })).data.orders.length, 0);
+    const replay = await call("/api/checkout", { method: "POST", cookie: customerCookie, body });
+    assert.equal(replay.status, 200);
+    assert.equal(replay.data.orderId, placed.data.orderId);
+    const token = randomBytes(32).toString("base64url");
+    await pool.execute("INSERT INTO customer_verification_tokens (token_hash, customer_id, expires_at) VALUES (?, ?, DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 1 HOUR))", [hashToken(token), session.data.customer.id]);
+    const password = "secure-test-password";
+    assert.equal((await call("/api/customer/verification/confirm", { method: "POST", body: { token, password } })).status, 200);
+    assert.equal((await call("/api/customer/verification/confirm", { method: "POST", body: { token, password } })).status, 400);
+    const login = await call("/api/customer/login", { method: "POST", body: { email, password } });
+    assert.equal(login.status, 200);
+    assert.equal((await call("/api/orders", { cookie: mergeCookies("", login.cookies) })).data.orders[0].orderNumber, placed.data.orderNumber);
+  });
+
+  await t.test("checkout with an existing email cannot access that customer's orders", async () => {
+    const email = `existing-${suffix}@example.com`;
+    const password = "secure-test-password";
+    const account = await call("/api/customer/register", { method: "POST", body: { name: "Existing", email, password } });
+    assert.equal(account.status, 201);
+    const item = await product(22000, 2);
+    const cookie = await cartWithItem(item);
+    const placed = await call("/api/checkout", { method: "POST", cookie, body: checkoutBody(item, `existing-${suffix}`, { email }) });
+    assert.equal(placed.status, 201);
+    const current = mergeCookies(cookie, placed.cookies);
+    const session = await call("/api/customer/session", { cookie: current });
+    assert.notEqual(session.data.customer.id, account.data.customer.id);
+    assert.equal((await call("/api/orders", { cookie: mergeCookies("", account.cookies) })).data.orders.length, 0);
+    const login = await call("/api/customer/login", { method: "POST", cookie: current, body: { email, password } });
+    assert.equal(login.status, 200);
+    assert.equal((await call("/api/orders", { cookie: mergeCookies(current, login.cookies) })).data.orders[0].orderNumber, placed.data.orderNumber);
+  });
 
   await t.test("same-key replay, immutable conflict, and guest ownership", async () => {
     const item = await product(31000, 3);

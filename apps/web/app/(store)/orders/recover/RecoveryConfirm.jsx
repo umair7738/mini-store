@@ -1,5 +1,7 @@
 "use client";
 
+import { apiFetch } from "../../../../lib/apiFetch";
+
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -13,7 +15,7 @@ export default function VerifyOrderAccess() {
   async function verify() {
     setBusy(true); setError("");
     try {
-      const response = await fetch("/api/orders/recover/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }) });
+      const response = await apiFetch("/api/orders/recover/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message || "This verification link is invalid or expired.");
       router.replace(`/orders/${data.orderNumber}`);

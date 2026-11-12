@@ -54,9 +54,6 @@ CREATE TABLE IF NOT EXISTS orders (
   carrier VARCHAR(80) NULL,
   tracking_number VARCHAR(120) NULL,
   tracking_url VARCHAR(500) NULL,
-  refund_status ENUM('none', 'pending', 'completed') NOT NULL DEFAULT 'none',
-  refund_note VARCHAR(500) NULL,
-  refund_updated_at DATETIME(6) NULL,
   confirmation_token_hash BINARY(32) NOT NULL,
   confirmation_expires_at DATETIME(6) NOT NULL,
   created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
@@ -105,7 +102,8 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
 
 CREATE TABLE IF NOT EXISTS customers (
   id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  email VARCHAR(254) NOT NULL UNIQUE,
+  email VARCHAR(254) NULL UNIQUE,
+  pending_email VARCHAR(254) NULL,
   password_hash VARCHAR(200) NOT NULL,
   full_name VARCHAR(120) NOT NULL,
   phone VARCHAR(30) NULL,
@@ -119,6 +117,13 @@ CREATE TABLE IF NOT EXISTS customer_sessions (
   expires_at DATETIME(6) NOT NULL,
   CONSTRAINT fk_customer_sessions_customer FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE,
   INDEX idx_customer_sessions_expiry (expires_at)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS customer_verification_tokens (
+  token_hash BINARY(32) PRIMARY KEY,
+  customer_id INT UNSIGNED NOT NULL,
+  expires_at DATETIME(6) NOT NULL,
+  CONSTRAINT fk_customer_verification_customer FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS customer_addresses (

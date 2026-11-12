@@ -18,7 +18,6 @@ function cleanup(now, maxKeys) {
   for (const [key, bucket] of buckets) {
     if (bucket.resetAt <= now) buckets.delete(key);
   }
-  while (buckets.size > maxKeys) buckets.delete(buckets.keys().next().value);
 }
 
 export function clientAddress(req) {
@@ -45,6 +44,10 @@ export function rateLimit({ name, limitEnv, fallbackLimit, windowMs = defaultWin
     const now = Date.now();
     cleanup(now, maxKeys);
     const parts = [...new Set((key(req) || []).map((part) => `${name}:${String(part)}`))];
+    if (buckets.size + parts.filter((part) => !buckets.has(part)).length > maxKeys) {
+      res.set("Retry-After", "60");
+      return next(new HttpError(429, code, message));
+    }
     let retryAfter = 0;
     for (const part of parts) {
       const bucket = buckets.get(part);

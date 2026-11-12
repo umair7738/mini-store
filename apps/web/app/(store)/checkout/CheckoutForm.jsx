@@ -1,11 +1,14 @@
 "use client";
 
+import { apiFetch } from "../../../lib/apiFetch";
+
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { usePending } from "../../usePending";
 import { money } from "../../../lib/money";
 import { focusField, invalidForm, notify } from "../../Toast";
+import { useCart } from "../components/CartProvider";
 import ProductImage from "../components/ProductImage";
 
 const pendingStorageKey = "mini-checkout-pending-v1";
@@ -25,6 +28,7 @@ const terminalCodes = [
 
 export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attempt = "" }) {
   const router = useRouter();
+  const shared = useCart();
   const [cart, setCart] = useState(null);
   const [form, setForm] = useState({ name: "", email: "", phone: "", address: "" });
   const [idempotencyKey, setIdempotencyKey] = useState("");
@@ -78,27 +82,28 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
   }, [attempt]);
 
   async function loadCart() {
-    const response = await fetch("/api/cart");
-    if (!response.ok) throw new Error("Cart is unavailable");
-    setCart(await response.json());
+    await shared.store.load();
+    const snapshot = shared.store.getSnapshot();
+    if (snapshot.unresolved) throw new Error(snapshot.error);
+    setCart(snapshot.cart);
   }
   useEffect(() => {
     if (!initialized || pendingGate) return undefined;
     let cancelled = false;
     const load = async () => {
       try {
-        const sessionResponse = await fetch("/api/customer/session", { cache: "no-store" });
+        const sessionResponse = await apiFetch("/api/customer/session", { cache: "no-store" });
         const session = sessionResponse.ok ? (await sessionResponse.json()).customer : null;
         if (!cancelled && session) {
           setCustomer(session);
           setForm((current) => ({ ...current, name: session.name || "", email: session.email || "", phone: session.phone || "" }));
-          const addressResponse = await fetch("/api/customer/addresses", { cache: "no-store" });
+          const addressResponse = await apiFetch("/api/customer/addresses", { cache: "no-store" });
           if (addressResponse.ok && !cancelled) setAddresses((await addressResponse.json()).addresses);
         }
         if (buyNow) {
-          const cartResponse = await fetch("/api/cart", { cache: "no-store" });
+          await shared.store.load();
           if (!cartResponse.ok) throw new Error("Cart is unavailable");
-          const response = await fetch(`/api/products/${encodeURIComponent(buyNow)}`, { cache: "no-store" });
+          const response = await apiFetch(`/api/products/${encodeURIComponent(buyNow)}`, { cache: "no-store" });
           if (!response.ok) throw new Error("This product is unavailable");
           const product = (await response.json()).product;
           const quantity = Math.max(1, Math.min(20, Number.parseInt(buyNowQuantity, 10) || 1));
@@ -114,7 +119,7 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
     if (!record?.body) return;
     setError("");
     try {
-      const response = await fetch("/api/checkout", {
+      const response = await apiFetch("/api/checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(record.body),
@@ -130,7 +135,7 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
       }
       clearPending();
       notify("Order placed successfully");
-      if (!buyNow) window.dispatchEvent(new Event("cart-updated"));
+      if (!buyNow) shared.store.replace({ items: [], totalFils: 0 });
       setNavigating(true);
       router.push(`/orders/${data.orderNumber}`);
     } catch {
@@ -143,7 +148,7 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
   async function submit(event) {
     event.preventDefault();
     const formElement = event.currentTarget;
-    if (!cart?.items.length || busy) return;
+    if ((!buyNow && (shared.pending || shared.unresolved)) || !cart?.items.length || busy) return;
     for (const field of ["name", "address"]) {
       if (!form[field].trim()) {
         notify(`Please enter your ${field}`, "error");
@@ -164,7 +169,7 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
     setPendingAttempt(pending);
     setIdempotencyKey(requestKey);
     try {
-      const response = await fetch("/api/checkout", {
+      const response = await apiFetch("/api/checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -189,7 +194,7 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
       }
       notify("Order placed successfully");
       clearPending();
-      if (!buyNow) window.dispatchEvent(new Event("cart-updated"));
+      if (!buyNow) shared.store.replace({ items: [], totalFils: 0 });
       setNavigating(true);
       router.push(`/orders/${data.orderNumber}`);
     } catch {
@@ -305,7 +310,7 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
                 <span className="payment-code">COD</span>
               </label>
             </fieldset>
-            <button className="button" disabled={busy || navigating || !initialized}>
+            <button className="button" disabled={busy || navigating || !initialized || (!buyNow && (shared.pending || shared.unresolved))}>
               {busy
                 ? "Placing order…"
                 : `Place order · ${money(cart.totalFils)}`}

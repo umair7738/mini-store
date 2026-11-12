@@ -1,5 +1,7 @@
 "use client";
 
+import { apiFetch } from "../../lib/apiFetch";
+
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
@@ -31,7 +33,7 @@ export default function AdminShell({ children }) {
   useEffect(() => {
     if (isLogin) return;
     let cancelled = false;
-    fetch("/api/admin/session", { cache: "no-store" })
+    apiFetch("/api/admin/session", { cache: "no-store" })
       .then((response) => {
         if (response.status === 401) {
           router.replace("/admin/login");
@@ -56,7 +58,7 @@ export default function AdminShell({ children }) {
 
   const request = useCallback(
     async (path, options = {}) => {
-      const response = await fetch(path, {
+      const response = await apiFetch(path, {
         ...options,
         cache: "no-store",
         headers: {

@@ -1,29 +1,13 @@
 "use client";
 
+import { apiFetch } from "../../../lib/apiFetch";
+
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCart } from "./CartProvider";
 
 export default function StoreHeader() {
-  const [count, setCount] = useState(0);
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = () =>
-      fetch("/api/cart")
-        .then((response) => (response.ok ? response.json() : null))
-        .then((cart) => {
-          if (!cancelled && cart) {
-            setCount(cart.items.reduce((total, item) => total + item.quantity, 0));
-          }
-        })
-        .catch(() => {});
-    load();
-    window.addEventListener("cart-updated", load);
-    return () => {
-      cancelled = true;
-      window.removeEventListener("cart-updated", load);
-    };
-  }, []);
+  const { cart } = useCart();
+  const count = cart?.items.reduce((total, item) => total + item.quantity, 0) || 0;
 
   return (
     <header className="site-header">

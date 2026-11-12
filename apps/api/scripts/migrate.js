@@ -15,6 +15,8 @@ try {
     .filter(Boolean)) {
     await connection.query(statement);
   }
+  const [pendingEmail] = await connection.execute("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'customers' AND COLUMN_NAME = 'pending_email'");
+  if (!pendingEmail.length) await connection.query("ALTER TABLE customers MODIFY email VARCHAR(254) NULL, ADD COLUMN pending_email VARCHAR(254) NULL AFTER email");
   const [customerIdColumn] = await connection.execute(
     "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'orders' AND COLUMN_NAME = 'customer_id'",
   );

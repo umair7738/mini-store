@@ -18,7 +18,7 @@ A small sanitary-products store built for a one-day Node.js practical assessment
 | `apps/api/src/auth.js`     | Admin login, scrypt verification, sessions, and CSRF              |
 | `apps/api/src/customerAuth.js` | Customer accounts, scrypt passwords, address ownership, and CSRF |
 | `apps/api/src/guestSessions.js` | Hashed, revocable guest order sessions                           |
-| `apps/api/src/orders.js`   | Owner-checked customer/guest order history, recovery, status, and refunds |
+| `apps/api/src/orders.js`   | Owner-checked customer/guest order history, recovery, and status |
 | `apps/api/src/server.js`   | Express setup, Origin check, routes, and errors                   |
 | `apps/web/app/(store)`     | Public storefront, cart, checkout, and confirmation pages         |
 | `apps/web/app/admin`       | Admin login, overview, rich product editor, and order workspace   |
@@ -82,8 +82,7 @@ All paths start with `/api`. JSON errors have `{ "code": "...", "message": "..."
 | `PUT/DELETE /admin/products/:id`                                | Update or archive a product                        |
 | `GET /admin/orders`, `GET /admin/orders/:id`                    | Latest orders and private order details            |
 | `PATCH /admin/orders/:id/status`                                | Process, complete, or cancel and restock           |
-| `POST /admin/orders/:id/refund`                                 | Record a pending manual refund                     |
-| `PATCH /admin/orders/:id/refund`                                | Mark the manual refund complete                    |
+| `PATCH /admin/orders/:id/tracking`                              | Correct details while dispatched                   |
 
 The checkout response contains the internal `orderId`, public `publicId`, `orderNumber`, and `totalFils`. Order access is authorized by the current guest-order session or signed-in customer session; new public responses do not add a bearer confirmation token. A repeated request with the same idempotency key and immutable checkout details returns the original order; a conflicting reuse is rejected. The checkout page stores only the minimum pending request needed to reconcile a network-uncertain attempt in browser `sessionStorage`, and requires reconciliation before starting another attempt.
 
@@ -93,13 +92,13 @@ The server ignores client item prices. It validates the required phone number an
 
 ## Order operations and forms
 
-Admins can move an order from placed → processing → completed, or cancel a placed/processing order. Cancellation locks the order and restores stock once in the same transaction. Completed orders cannot be cancelled. A cancelled or completed order can have a pending full-order manual refund note, then be marked refunded after the work is done outside this app. **These actions do not move money.** The dashboard shows the latest 100 orders and does not keep a separate status-event history.
+Admins can move an order from placed → processing → completed, or cancel a placed/processing order. Cancellation locks the order and restores stock once in the same transaction. Completed orders cannot be cancelled. The dashboard shows the latest 100 orders and does not keep a separate status-event history.
 
 Forms keep browser and backend validation. An invalid browser field receives a toast, focus, and a scroll into view. Success and API errors also appear as toast notifications. The backend remains authoritative for prices, stock, unique values, and order transitions.
 
-The admin workspace at `/admin` has a separate responsive layout. Its overview shows active products, low-stock inventory, recent open orders, and pending manual refunds using the existing protected APIs. Product management provides search and a visual rich-text description editor. `AdminShell.jsx` verifies the session, sends CSRF tokens with writes, and provides navigation and sign-out. Overview order counts cover only the latest 100 orders returned by the API.
+The admin workspace at `/admin` has a separate responsive layout. Its overview shows active products, low-stock inventory, and recent open orders using the existing protected APIs. Product management provides search and a visual rich-text description editor. `AdminShell.jsx` verifies the session, sends CSRF tokens with writes, and provides navigation and sign-out. Overview order counts cover only the latest 100 orders returned by the API.
 
-Staff move orders through **New order → Preparing → Dispatched → Delivered**. Dispatch requires a carrier and tracking number, records a timestamped progress event, and optionally gives the customer a tracking link on their protected confirmation page. Cancellation before dispatch returns stock inside the existing transaction. Tracking data and the event trail are stored in MySQL. Carrier updates and automated courier updates are not included.
+Staff move orders through **New order → Preparing → Dispatched → Delivered**. Dispatch requires a carrier and tracking number, records a timestamped progress event, and optionally gives the customer a tracking link on their protected confirmation page. Staff can correct dispatch tracking details while the order remains dispatched; each change records a progress event. Cancellation before dispatch returns stock inside the existing transaction. Tracking data and the event trail are stored in MySQL. Automated courier updates are not included.
 
 ## Verification performed
 

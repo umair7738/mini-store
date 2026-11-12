@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { money } from "../../lib/money";
+import { dateKey, formatDate } from "../../lib/dates";
 import { useAdmin } from "./AdminShell";
 
 const statusLabel = {
@@ -14,20 +15,15 @@ const statusLabel = {
   cancelled: "Cancelled",
 };
 
-function dayKey(date) {
-  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
-}
-
 function orderActivity(orders) {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  const today = new Date(`${dateKey(new Date())}T00:00:00Z`);
   return Array.from({ length: 7 }, (_, index) => {
     const date = new Date(today);
-    date.setDate(today.getDate() - (6 - index));
-    const key = dayKey(date);
+    date.setUTCDate(today.getUTCDate() - (6 - index));
+    const key = date.toISOString().slice(0, 10);
     return {
-      label: new Intl.DateTimeFormat("en", { weekday: "short" }).format(date),
-      count: orders.filter((order) => dayKey(new Date(order.createdAt)) === key).length,
+      label: formatDate(date, { weekday: "short" }),
+      count: orders.filter((order) => dateKey(order.createdAt) === key).length,
     };
   });
 }
@@ -87,7 +83,6 @@ export default function AdminOverviewPage() {
   ) || [];
   const preparing = orders?.filter((order) => order.status === "processing") || [];
   const dispatched = orders?.filter((order) => order.status === "shipped") || [];
-  const refunded = orders?.filter((order) => order.refundStatus === "pending") || [];
   const days = useMemo(() => orderActivity(orders || []), [orders]);
 
   return (
@@ -129,7 +124,6 @@ export default function AdminOverviewPage() {
                 <Link href="/admin/orders"><span className="queue-dot placed" /><span>New orders</span><strong>{orders.filter((order) => order.status === "placed").length}</strong></Link>
                 <Link href="/admin/orders"><span className="queue-dot processing" /><span>Preparing</span><strong>{preparing.length}</strong></Link>
                 <Link href="/admin/orders"><span className="queue-dot shipped" /><span>Dispatched</span><strong>{dispatched.length}</strong></Link>
-                <Link href="/admin/orders"><span className="queue-dot warning" /><span>Refund follow-up</span><strong>{refunded.length}</strong></Link>
               </div>
             </section>
           </div>
@@ -143,7 +137,7 @@ export default function AdminOverviewPage() {
                   {orders.slice(0, 5).map((order) => (
                     <Link href="/admin/orders" key={order.id} className="admin-orders-row" role="row">
                       <strong>{order.orderNumber}</strong>
-                      <span><strong>{order.name}</strong><small>{new Date(order.createdAt).toLocaleDateString("en-AE")}</small></span>
+                      <span><strong>{order.name}</strong><small>{formatDate(order.createdAt, { dateStyle: "short" })}</small></span>
                       <span className={`status-pill ${order.status}`}>{statusLabel[order.status]}</span>
                       <strong>{money(order.totalFils)}</strong>
                     </Link>

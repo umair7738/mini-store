@@ -31,6 +31,14 @@ app.use((req, res, next) => {
   res.on("finish", () => console.info(JSON.stringify({ requestId: req.requestId, method: req.method, route: req.baseUrl || "/", status: res.statusCode, durationMs: Date.now() - started })));
   next();
 });
+app.use((req, res, next) => {
+  if (/^\/api\/(cart|customer|orders|checkout|admin)(\/|$)/.test(req.path)) res.set("Cache-Control", "no-store");
+  next();
+});
+app.use((req, res, next) => {
+  if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && req.path !== "/api/admin/uploads/images" && (req.headers["content-length"] !== "0") && (req.headers["transfer-encoding"] || Number(req.headers["content-length"]) > 0) && !req.is("application/json")) return next(new HttpError(415, "UNSUPPORTED_MEDIA_TYPE", "Use application/json"));
+  next();
+});
 app.use(express.json({ limit: "32kb" }));
 app.use(cookieParser());
 app.use((req, res, next) => {
@@ -63,26 +71,33 @@ app.get("/api/health", async (req, res) => {
 });
 app.use("/api/uploads/products", express.static(uploadDir));
 app.use("/api/products", rateLimit({ name: "products", limitEnv: "RATE_LIMIT_PUBLIC_PER_MINUTE", fallbackLimit: 120, key: (req) => [clientAddress(req)] }), publicProducts);
-app.use("/api/cart", rateLimit({ name: "cart", limitEnv: "RATE_LIMIT_CART_PER_MINUTE", fallbackLimit: 60, key: (req) => [clientAddress(req), cookieKey(req, "mini_cart")] }), cartRouter);
+function readWriteLimit(name, cookie, writeEnv, writeLimit = 60) {
+  const key = (req) => [`ip:${clientAddress(req)}`, ...(req.cookies?.[cookie] ? [`session:${cookieKey(req, cookie)}`] : [])];
+  const read = rateLimit({ name: `${name}-read`, limitEnv: "RATE_LIMIT_PRIVATE_READS_PER_MINUTE", fallbackLimit: 120, key });
+  const write = rateLimit({ name: `${name}-write`, limitEnv: writeEnv, fallbackLimit: writeLimit, key });
+  return (req, res, next) => (["GET", "HEAD"].includes(req.method) ? read : write)(req, res, next);
+}
+app.use("/api/cart", readWriteLimit("cart", "mini_cart", "RATE_LIMIT_CART_PER_MINUTE"), cartRouter);
 app.use("/api/checkout",
   rateLimit({ name: "checkout-ip", limitEnv: "RATE_LIMIT_CHECKOUT_PER_MINUTE", fallbackLimit: 10, key: (req) => [clientAddress(req)] }),
   rateLimit({ name: "checkout-session", limitEnv: "RATE_LIMIT_CHECKOUT_SESSION_PER_MINUTE", fallbackLimit: 5, key: (req) => [clientAddress(req), cookieKey(req, "mini_cart")] }),
   checkoutRouter,
 );
-app.use("/api/orders", ordersRouter);
-app.use("/api/customer", customerRouter);
+app.use("/api/orders", readWriteLimit("orders", "mini_guest", "RATE_LIMIT_ORDER_ACTIONS_PER_MINUTE", 30), ordersRouter);
+app.use("/api/customer", readWriteLimit("customer", "mini_customer", "RATE_LIMIT_CUSTOMER_ACTIONS_PER_MINUTE", 30), customerRouter);
+app.use(["/api/admin/session", "/api/admin/login", "/api/admin/logout"], readWriteLimit("admin-session", "mini_admin", "RATE_LIMIT_ADMIN_SESSION_ACTIONS_PER_MINUTE", 30));
 app.use("/api/admin", authRouter);
 app.use(
   "/api/admin/uploads",
   requireAdmin,
-  rateLimit({ name: "admin-upload", limitEnv: "RATE_LIMIT_UPLOADS_PER_MINUTE", fallbackLimit: 10, key: (req) => [cookieKey(req, "mini_admin")] }),
+  rateLimit({ name: "admin-upload", limitEnv: "RATE_LIMIT_UPLOADS_PER_MINUTE", fallbackLimit: 10, key: (req) => [clientAddress(req), cookieKey(req, "mini_admin")] }),
   (req, res, next) => req.method === "GET" ? next() : requireCsrf(req, res, next),
   uploadsRouter,
 );
 app.use(
   "/api/admin/products",
   requireAdmin,
-  rateLimit({ name: "admin-products", limitEnv: "RATE_LIMIT_ADMIN_MUTATIONS_PER_MINUTE", fallbackLimit: 60, key: (req) => [cookieKey(req, "mini_admin")] }),
+  readWriteLimit("admin-products", "mini_admin", "RATE_LIMIT_ADMIN_MUTATIONS_PER_MINUTE"),
   (req, res, next) => {
     if (["GET", "HEAD"].includes(req.method)) return next();
     requireCsrf(req, res, next);
@@ -92,7 +107,7 @@ app.use(
 app.use(
   "/api/admin/orders",
   requireAdmin,
-  rateLimit({ name: "admin-orders", limitEnv: "RATE_LIMIT_ADMIN_MUTATIONS_PER_MINUTE", fallbackLimit: 60, key: (req) => [cookieKey(req, "mini_admin")] }),
+  readWriteLimit("admin-orders", "mini_admin", "RATE_LIMIT_ADMIN_MUTATIONS_PER_MINUTE"),
   (req, res, next) => {
     if (["GET", "HEAD"].includes(req.method)) return next();
     requireCsrf(req, res, next);
@@ -103,6 +118,7 @@ app.use((req, res, next) =>
   next(new HttpError(404, "NOT_FOUND", "Route not found")),
 );
 app.use((error, req, res, next) => {
+  if (error.type === "entity.too.large") return res.status(413).json({ code: "BODY_TOO_LARGE", message: "Request body is too large", requestId: req.requestId });
   if (error.code === "ER_DUP_ENTRY") {
     const key = error.sqlMessage?.match(/for key '([^']+)'/)?.[1] || "";
     if (key.includes("email") && error.sqlMessage?.includes("customers")) return res.status(409).json({ code: "EMAIL_REGISTERED", message: "An account already exists for this email", requestId: req.requestId });

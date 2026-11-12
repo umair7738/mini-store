@@ -1,3 +1,4 @@
+import { headers } from "next/headers";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { getProduct } from "../../../../lib/products";
@@ -51,6 +52,7 @@ export default async function ProductPage({ params }) {
       </div>
       <script
         type="application/ld+json"
+        nonce={(await headers()).get("x-nonce") || undefined}
         dangerouslySetInnerHTML={{
           __html: JSON.stringify(structured).replace(/</g, "\\u003c"),
         }}

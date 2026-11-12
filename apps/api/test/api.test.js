@@ -202,8 +202,6 @@ test("product-only API, cart, checkout and order history", async (t) => {
     assert.equal(delivered.trackingNumber, "TRACK123");
     assert.equal((await admin(`/api/admin/orders/${bought.data.orderId}/status`, "PATCH", { status: "cancelled" })).status, 409);
     assert.equal((await admin(`/api/admin/orders/${bought.data.orderId}/status`, "PATCH", { status: "processing" })).status, 409);
-    assert.equal((await admin(`/api/admin/orders/${bought.data.orderId}/refund`, "POST", { note: "Refund recorded offline" })).status, 201);
-    assert.equal((await admin(`/api/admin/orders/${bought.data.orderId}/refund`, "PATCH", { status: "completed" })).status, 200);
 
     const retainedCart = await call("/api/cart", { cookie: activeCart.cookie });
     assert.equal(retainedCart.data.items.length, 1);
