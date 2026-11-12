@@ -6,6 +6,7 @@ import { decryptOrderReference } from "./orderReference.js";
 import { getCustomer } from "./customerAuth.js";
 import { forgetGuestSession, getGuestSession, setGuestCookie } from "./guestSessions.js";
 import { HttpError, email, id, object, string, webUrl } from "./validation.js";
+import { pagination } from "./pagination.js";
 import { clientAddress, identifierHash, rateLimit } from "./rateLimit.js";
 
 export const ordersRouter = Router();
@@ -182,13 +183,32 @@ ordersRouter.get("/:publicId", async (req, res) => {
 });
 
 adminOrders.get("/", async (req, res) => {
-  // shortcut: show the latest 100 orders; add pagination when the dashboard grows.
+  let where = "";
+  let params = [];
+  let pageInfo = {};
+  let limit = "LIMIT 100";
+  if (req.query.page !== undefined) {
+    const { page, search, size } = pagination(req.query);
+    const status = req.query.status || "all";
+    if (!["all", "placed", "processing", "shipped", "delivered", "completed", "cancelled", "refund"].includes(status)) throw new HttpError(400, "INVALID_INPUT", "Invalid order status");
+    where = `WHERE (LOCATE(?, CONCAT('DM-', LPAD(id, GREATEST(8, LENGTH(id)), '0'))) > 0 OR LOCATE(?, customer_name) > 0 OR LOCATE(?, customer_email) > 0)`;
+    params = [search, search, search];
+    if (status === "refund") where += " AND refund_status = 'pending'";
+    else if (status !== "all") { where += " AND status = ?"; params.push(status); }
+    const [counts] = await pool.execute(`SELECT COUNT(*) AS total FROM orders ${where}`, params);
+    const total = counts[0].total;
+    const currentPage = Math.min(page, Math.max(1, Math.ceil(total / size)));
+    pageInfo = { total, page: currentPage, pageSize: size };
+    limit = "LIMIT ? OFFSET ?";
+    params = [...params, size, (currentPage - 1) * size];
+  }
   const [rows] = await pool.execute(
     `SELECT id, customer_name, customer_email, total_fils, currency, status,
-            refund_status, created_at FROM orders ORDER BY id DESC LIMIT 100`,
+            refund_status, payment_status, created_at FROM orders ${where} ORDER BY id DESC ${limit}`,
+    params,
   );
   res.json({
-    orders: rows.map((row) => ({
+    ...pageInfo, orders: rows.map((row) => ({
       id: row.id,
       orderNumber: `DM-${String(row.id).padStart(8, "0")}`,
       name: row.customer_name,
@@ -197,6 +217,7 @@ adminOrders.get("/", async (req, res) => {
       currency: row.currency,
       status: row.status,
       refundStatus: row.refund_status,
+      paymentStatus: row.payment_status,
       createdAt: row.created_at,
     })),
   });
@@ -206,7 +227,7 @@ adminOrders.get("/:id", async (req, res) => {
   const [rows] = await pool.execute(
     `SELECT id, public_id, customer_name, customer_email, customer_phone, customer_address, currency, total_fils,
             status, status_updated_at, carrier, tracking_number, tracking_url,
-            refund_status, refund_note, refund_updated_at, created_at
+            refund_status, refund_note, refund_updated_at, payment_status, created_at
      FROM orders WHERE id = ?`,
     [id(req.params.id)],
   );
@@ -214,6 +235,7 @@ adminOrders.get("/:id", async (req, res) => {
   res.json({
     order: {
       ...orderResponse(rows[0], await orderItems(rows[0].id), { internal: true }),
+      paymentStatus: rows[0].payment_status,
       refundNote: rows[0].refund_note,
       refundUpdatedAt: rows[0].refund_updated_at,
       events: await orderEvents(rows[0].id),
@@ -234,11 +256,11 @@ adminOrders.patch("/:id/status", async (req, res) => {
   const trackingUrl = req.body.trackingUrl == null
     ? null
     : webUrl(req.body.trackingUrl, "Tracking link");
-  if (status === "shipped" && (!carrier || !trackingNumber)) {
+  if (["shipped", "delivered"].includes(status) && (!carrier || !trackingNumber)) {
     throw new HttpError(
       400,
       "TRACKING_REQUIRED",
-      "Add a carrier and tracking number before marking this order as dispatched",
+      "Add a carrier and tracking number before marking this order as dispatched or delivered",
     );
   }
   const connection = await pool.getConnection();
@@ -254,9 +276,9 @@ adminOrders.patch("/:id/status", async (req, res) => {
     if (current !== status) {
       const allowed =
         current === "placed"
-          ? ["processing", "cancelled"]
+          ? ["processing", "shipped", "delivered", "cancelled"]
           : current === "processing"
-            ? ["shipped", "cancelled"]
+            ? ["shipped", "delivered", "cancelled"]
             : current === "shipped"
               ? ["delivered"]
             : [];
@@ -279,7 +301,7 @@ adminOrders.patch("/:id/status", async (req, res) => {
           );
         }
       }
-      if (status === "shipped") {
+      if (["shipped", "delivered"].includes(status)) {
         await connection.execute(
           `UPDATE orders SET status = ?, status_updated_at = UTC_TIMESTAMP(6),
            carrier = ?, tracking_number = ?, tracking_url = ? WHERE id = ?`,
@@ -312,6 +334,19 @@ adminOrders.patch("/:id/status", async (req, res) => {
   } finally {
     connection.release();
   }
+});
+
+adminOrders.patch("/:id/payment-status", async (req, res) => {
+  object(req.body, ["status"]);
+  if (!["paid", "unpaid"].includes(req.body.status)) {
+    throw new HttpError(400, "INVALID_INPUT", "Invalid payment status");
+  }
+  const [result] = await pool.execute(
+    "UPDATE orders SET payment_status = ? WHERE id = ?",
+    [req.body.status, id(req.params.id)],
+  );
+  if (!result.affectedRows) throw new HttpError(404, "NOT_FOUND", "Order not found");
+  res.json({ paymentStatus: req.body.status });
 });
 
 adminOrders.post("/:id/refund", async (req, res) => {

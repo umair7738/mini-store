@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { pool } from "./db.js";
 import { HttpError, id, imageUrl, integer, object, richText, slug, string } from "./validation.js";
+import { pagination } from "./pagination.js";
 
 export const publicProducts = Router();
 export const adminProducts = Router();
@@ -41,12 +42,16 @@ function mapProduct(row) {
     priceFils: row.price_fils,
     stock: row.stock,
     isActive: Boolean(row.is_active),
+    ...(row.can_delete !== undefined && { canDelete: Boolean(row.can_delete) }),
   };
 }
 
-async function getProducts(includeArchived = false) {
+async function getProducts(includeArchived = false, includeDeleteEligibility = false) {
   const [rows] = await pool.execute(
     `SELECT id, slug, name, description, image_url, images, sku, price_fils, stock, is_active
+     ${includeDeleteEligibility ? `,
+       NOT EXISTS (SELECT 1 FROM cart_items ci WHERE ci.product_id = products.id)
+       AND NOT EXISTS (SELECT 1 FROM order_items oi WHERE oi.product_id = products.id) AS can_delete` : ""}
      FROM products ${includeArchived ? "" : "WHERE is_active = 1"} ORDER BY id`,
   );
   return rows.map(mapProduct);
@@ -58,7 +63,21 @@ publicProducts.get("/:slug", async (req, res) => {
   if (!product) throw new HttpError(404, "NOT_FOUND", "Product not found");
   res.json({ product });
 });
-adminProducts.get("/", async (req, res) => res.json({ products: await getProducts(true) }));
+adminProducts.get("/", async (req, res) => {
+  if (req.query.page === undefined) return res.json({ products: await getProducts(true, true) });
+  const { page, search, size } = pagination(req.query);
+  const [counts] = await pool.execute("SELECT COUNT(*) AS total FROM products WHERE LOCATE(?, name) > 0 OR LOCATE(?, sku) > 0", [search, search]);
+  const total = counts[0].total;
+  const currentPage = Math.min(page, Math.max(1, Math.ceil(total / size)));
+  const [rows] = await pool.execute(
+    `SELECT id, slug, name, description, image_url, images, sku, price_fils, stock, is_active,
+       NOT EXISTS (SELECT 1 FROM cart_items ci WHERE ci.product_id = products.id)
+       AND NOT EXISTS (SELECT 1 FROM order_items oi WHERE oi.product_id = products.id) AS can_delete
+     FROM products WHERE LOCATE(?, name) > 0 OR LOCATE(?, sku) > 0 ORDER BY id DESC LIMIT ? OFFSET ?`,
+    [search, search, size, (currentPage - 1) * size],
+  );
+  res.json({ products: rows.map(mapProduct), total, page: currentPage, pageSize: size });
+});
 
 adminProducts.post("/", async (req, res) => {
   const product = productInput(req.body, true);
@@ -80,6 +99,36 @@ adminProducts.put("/:id", async (req, res) => {
   const [result] = await pool.execute(`UPDATE products SET ${fields.join(", ")} WHERE id = ?`, values);
   if (!result.affectedRows) throw new HttpError(404, "NOT_FOUND", "Product not found");
   res.json({ message: "Product updated" });
+});
+
+adminProducts.patch("/:id/visibility", async (req, res) => {
+  object(req.body, ["isActive"]);
+  if (typeof req.body.isActive !== "boolean") throw new HttpError(400, "INVALID_INPUT", "isActive must be a boolean");
+  const [result] = await pool.execute("UPDATE products SET is_active = ? WHERE id = ?", [req.body.isActive, id(req.params.id)]);
+  if (!result.affectedRows) throw new HttpError(404, "NOT_FOUND", "Product not found");
+  res.status(204).end();
+});
+
+adminProducts.delete("/:id/permanent", async (req, res) => {
+  const productId = id(req.params.id);
+  try {
+    const [result] = await pool.execute(
+      `DELETE FROM products
+       WHERE id = ?
+         AND NOT EXISTS (SELECT 1 FROM cart_items WHERE product_id = ?)
+         AND NOT EXISTS (SELECT 1 FROM order_items WHERE product_id = ?)`,
+      [productId, productId, productId],
+    );
+    if (!result.affectedRows) {
+      const [products] = await pool.execute("SELECT id FROM products WHERE id = ?", [productId]);
+      if (!products.length) throw new HttpError(404, "NOT_FOUND", "Product not found");
+      throw new HttpError(409, "PRODUCT_IN_USE", "Product is used in a cart or order");
+    }
+  } catch (error) {
+    if (error.code === "ER_ROW_IS_REFERENCED_2") throw new HttpError(409, "PRODUCT_IN_USE", "Product is used in a cart or order");
+    throw error;
+  }
+  res.status(204).end();
 });
 
 adminProducts.delete("/:id", async (req, res) => {

@@ -18,6 +18,10 @@ const nextConfig = {
   async rewrites() {
     return [
       {
+        source: "/uploads/products/:path*",
+        destination: `${process.env.API_TARGET || "http://127.0.0.1:4000"}/api/uploads/products/:path*`,
+      },
+      {
         source: "/api/:path*",
         destination: `${process.env.API_TARGET || "http://127.0.0.1:4000"}/api/:path*`,
       },

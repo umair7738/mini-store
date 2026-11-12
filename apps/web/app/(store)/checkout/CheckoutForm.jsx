@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { usePending } from "../../usePending";
 import { money } from "../../../lib/money";
 import { focusField, invalidForm, notify } from "../../Toast";
 import ProductImage from "../components/ProductImage";
@@ -33,7 +34,8 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
   const [initialized, setInitialized] = useState(false);
   const [readyVersion, setReadyVersion] = useState(0);
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [busy, run] = usePending();
+  const [navigating, setNavigating] = useState(false);
   const [customer, setCustomer] = useState(null);
   const [addresses, setAddresses] = useState([]);
 
@@ -110,7 +112,6 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
 
   async function reconcile(record) {
     if (!record?.body) return;
-    setBusy(true);
     setError("");
     try {
       const response = await fetch("/api/checkout", {
@@ -130,13 +131,12 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
       clearPending();
       notify("Order placed successfully");
       if (!buyNow) window.dispatchEvent(new Event("cart-updated"));
+      setNavigating(true);
       router.push(`/orders/${data.orderNumber}`);
     } catch {
       setPendingGate(record);
       setError("Checkout state is uncertain. Resolve the previous attempt before starting another.");
       notify("Checkout state is uncertain. Resolve the previous attempt before starting another.", "error");
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -151,7 +151,6 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
         return;
       }
     }
-    setBusy(true);
     setError("");
     const requestKey = idempotencyKey || crypto.randomUUID();
     const body = {
@@ -191,13 +190,12 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
       notify("Order placed successfully");
       clearPending();
       if (!buyNow) window.dispatchEvent(new Event("cart-updated"));
+      setNavigating(true);
       router.push(`/orders/${data.orderNumber}`);
     } catch {
       setPendingGate(pending);
       setError("Checkout state is uncertain. Resolve the previous attempt before starting another.");
       notify("Checkout state is uncertain. Resolve the previous attempt before starting another.", "error");
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -213,7 +211,7 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
       {pendingGate ? (
         <div className="empty">
           <p>A previous checkout attempt may have completed. Resolve it before starting another purchase.</p>
-          <button className="button" type="button" onClick={() => reconcile(pendingGate)} disabled={busy}>
+          <button className="button" type="button" onClick={() => run(() => reconcile(pendingGate))} disabled={busy || navigating}>
             {busy ? "Checking order status…" : "Resolve previous checkout"}
           </button>
         </div>
@@ -227,7 +225,7 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
       ) : (
         <div className="checkout-grid">
           <form
-            onSubmit={submit}
+            onSubmit={(event) => { event.preventDefault(); run(() => submit(event)); }}
             onInvalid={invalidForm}
             className="form-panel"
           >
@@ -307,7 +305,7 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
                 <span className="payment-code">COD</span>
               </label>
             </fieldset>
-            <button className="button" disabled={busy || !initialized}>
+            <button className="button" disabled={busy || navigating || !initialized}>
               {busy
                 ? "Placing order…"
                 : `Place order · ${money(cart.totalFils)}`}

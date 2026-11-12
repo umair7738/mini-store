@@ -7,6 +7,12 @@ import { validateAttemptPrincipal } from "../src/checkout.js";
 test("checkout idempotency migration preserves ownership constraints", async (t) => {
   t.after(() => pool.end());
 
+  const [paymentColumn] = await pool.execute(
+    "SELECT COLUMN_DEFAULT, COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'orders' AND COLUMN_NAME = 'payment_status'",
+  );
+  assert.equal(paymentColumn[0].COLUMN_DEFAULT, "unknown");
+  assert.match(paymentColumn[0].COLUMN_TYPE, /unknown.*unpaid.*paid/);
+
   const [ledger] = await pool.execute(
     "SELECT version FROM schema_migrations WHERE version = ?",
     ["20261112-checkout-idempotency"],

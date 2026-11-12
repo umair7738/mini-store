@@ -3,10 +3,12 @@
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { focusField, invalidForm, notify } from "../../Toast";
+import { usePending } from "../../usePending";
 import { useAdmin } from "../AdminShell";
 
 function RichTextEditor({ value, onChange }) {
   const editor = useRef(null);
+  const initialValue = useRef(value);
   function command(action, argument) {
     editor.current?.focus();
     document.execCommand(action, false, argument);
@@ -23,14 +25,15 @@ function RichTextEditor({ value, onChange }) {
       <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => { const url = window.prompt("Link address (https://…)"); if (url) command("createLink", url); }}>Link</button>
       <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => command("removeFormat")}>Clear format</button>
     </div>
-    <div ref={editor} className="rich-editor-content" contentEditable suppressContentEditableWarning role="textbox" aria-label="Product description" aria-multiline="true" onInput={(event) => onChange(event.currentTarget.innerHTML)} dangerouslySetInnerHTML={{ __html: value }} />
+    <div ref={editor} className="rich-editor-content" contentEditable suppressContentEditableWarning role="textbox" aria-label="Product description" aria-multiline="true" onInput={(event) => onChange(event.currentTarget.innerHTML)} dangerouslySetInnerHTML={{ __html: initialValue.current }} />
   </div>;
 }
 
 export default function ProductForm({ product = null }) {
   const { request } = useAdmin();
+  const [busy, run] = usePending();
   const router = useRouter();
-  const [value, setValue] = useState(() => product ? { ...product, images: product.images?.length ? product.images : product.imageUrl ? [product.imageUrl] : [], price: (product.priceFils / 100).toFixed(2), stock: String(product.stock) } : { name: "", slug: "", description: "<p></p>", images: [], sku: "", price: "", stock: "0", isActive: true });
+  const [value, setValue] = useState(() => product ? { ...product, images: product.images?.length ? product.images : product.imageUrl ? [product.imageUrl] : [], price: (product.priceFils / 100).toFixed(2), stock: String(product.stock) } : { name: "", slug: "", description: "<p></p>", images: [], sku: "", price: "", stock: "", isActive: true });
   const [error, setError] = useState("");
   const [uploading, setUploading] = useState(false);
   async function uploadImages(event) {
@@ -50,11 +53,9 @@ export default function ProductForm({ product = null }) {
   async function submit(event) {
     event.preventDefault();
     const form = event.currentTarget;
-    const [whole, fraction = ""] = String(value.price).split(".");
     try {
       setError("");
-      const payload = { ...value, imageUrl: value.images[0] || null, priceFils: Number(whole) * 100 + Number(fraction.padEnd(2, "0")), stock: Number(value.stock), slug: value.slug || value.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") };
-      delete payload.price;
+      const payload = { name: value.name, description: value.description, sku: value.sku, images: value.images, isActive: value.isActive, priceFils: Math.round(Number(value.price) * 100), stock: Number(value.stock), slug: value.slug || value.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") };
       if (product) await request(`/api/admin/products/${product.id}`, { method: "PUT", body: JSON.stringify(payload) });
       else await request("/api/admin/products", { method: "POST", body: JSON.stringify(payload) });
       notify(product ? "Product updated" : "Product created");
@@ -66,23 +67,23 @@ export default function ProductForm({ product = null }) {
       focusField(form, problem.field);
     }
   }
-  return <form className="form-panel product-form" onSubmit={submit} onInvalid={invalidForm}>
+  return <form className="form-panel product-form" onSubmit={(event) => { event.preventDefault(); run(() => submit(event)); }} onInvalid={invalidForm}>
     <header className="product-editor-heading"><div><h1>{product ? "Edit product" : "Add a product"}</h1><p>Manage the details customers see in your store.</p></div><label className="product-status-toggle"><input type="checkbox" checked={value.isActive} onChange={(e) => setValue({ ...value, isActive: e.target.checked })} /><span className="toggle-track" aria-hidden="true" /><span>{value.isActive ? "Active" : "Hidden"}</span></label></header>
     {error && <p className="notice error" role="alert">{error}</p>}
     <div className="product-form-grid">
       <div className="product-form-fields">
-        <label>Product name<input name="name" required minLength="2" maxLength="120" value={value.name} onChange={(e) => setValue({ ...value, name: e.target.value })} /></label>
+        <label>Product name <span className="required-star" aria-hidden="true">*</span><input name="name" required minLength="2" maxLength="120" value={value.name} onChange={(e) => setValue({ ...value, name: e.target.value })} /></label>
         <label>Product URL name<input name="slug" pattern="[a-z0-9]+(-[a-z0-9]+)*" maxLength="120" value={value.slug} onChange={(e) => setValue({ ...value, slug: e.target.value })} placeholder="Created from product name" /><small>Used in the product web address.</small></label>
         <label>Product description<RichTextEditor value={value.description} onChange={(description) => setValue({ ...value, description })} /></label>
-        <section className="image-upload-panel"><div className="image-upload-heading"><div><strong>Product images</strong><small>Upload up to 8 PNG, JPEG, or WebP images. First image is the main photo.</small></div><label className="button secondary small">{uploading ? "Uploading…" : "Upload images"}<input type="file" accept="image/png,image/jpeg,image/webp" multiple hidden disabled={uploading || value.images.length >= 8} onChange={uploadImages} /></label></div>{value.images.length > 0 && <div className="product-image-list">{value.images.map((image, index) => <div className="product-image-tile" key={image}><img src={image} alt={`Product image ${index + 1}`} /><button type="button" aria-label={`Remove image ${index + 1}`} onClick={() => setValue({ ...value, images: value.images.filter((_, itemIndex) => itemIndex !== index) })}>×</button>{index === 0 && <small>Main image</small>}</div>)}</div>}</section>
+        <section className="image-upload-panel"><div className="image-upload-heading"><div><strong>Product images</strong><small>Upload up to 8 PNG, JPEG, or WebP images. First image is the main photo.</small></div><label className="button secondary small">{uploading ? "Uploading…" : "Upload images"}<input type="file" accept="image/png,image/jpeg,image/webp" multiple hidden disabled={uploading || busy || value.images.length >= 8} onChange={uploadImages} /></label></div>{value.images.length > 0 && <div className="product-image-list">{value.images.map((image, index) => <div className="product-image-tile" key={image}><img src={image} alt={`Product image ${index + 1}`} /><button type="button" aria-label={`Remove image ${index + 1}`} onClick={() => setValue({ ...value, images: value.images.filter((_, itemIndex) => itemIndex !== index) })}>×</button>{index === 0 && <small>Main image</small>}</div>)}</div>}</section>
       </div>
       <aside className="product-inventory-panel">
         <h2>Price & inventory</h2>
-        <label>SKU<input name="sku" required maxLength="64" pattern="[A-Z0-9-]+" value={value.sku} onChange={(e) => setValue({ ...value, sku: e.target.value.toUpperCase() })} placeholder="DM-PRODUCT-001" /><small>Unique stock code for this product.</small></label>
-        <label>Price (AED)<input name="price" required type="number" min="0.01" step="0.01" value={value.price} onChange={(e) => setValue({ ...value, price: e.target.value })} /></label>
-        <label>Stock quantity<input name="stock" required type="number" min="0" step="1" value={value.stock} onChange={(e) => setValue({ ...value, stock: e.target.value })} /></label>
+        <label>SKU <span className="required-star" aria-hidden="true">*</span><input name="sku" required maxLength="64" pattern="[A-Z0-9-]+" value={value.sku} onChange={(e) => setValue({ ...value, sku: e.target.value.toUpperCase() })} placeholder="DM-PRODUCT-001" /><small>Unique stock code for this product.</small></label>
+        <label>Price (AED) <span className="required-star" aria-hidden="true">*</span><input name="price" required type="number" min="0.01" max="42949672.95" step="0.01" value={value.price} onChange={(e) => setValue({ ...value, price: e.target.value })} /><small>Enter at least AED 0.01.</small></label>
+        <label>Stock quantity <span className="required-star" aria-hidden="true">*</span><input name="stock" required type="number" min="0" max="4294967295" step="1" value={value.stock} onChange={(e) => setValue({ ...value, stock: e.target.value })} /><small>Enter a whole number; use 0 for out of stock.</small></label>
       </aside>
     </div>
-    <div className="button-row"><button className="button">{product ? "Save product" : "Create product"}</button><button type="button" className="button secondary" onClick={() => router.push("/admin/products")}>Cancel</button></div>
+    <div className="button-row"><button className="button" disabled={uploading || busy}>{product ? "Save product" : "Create product"}</button><button type="button" className="button secondary" onClick={() => router.push("/admin/products")}>Cancel</button></div>
   </form>;
 }

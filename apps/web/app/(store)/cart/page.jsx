@@ -1,12 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { usePending } from "../../usePending";
 import { money } from "../../../lib/money";
 import { notify } from "../../Toast";
 import ProductImage from "../components/ProductImage";
 
 export default function CartPage() {
+  const [busy, run] = usePending();
+  const [navigating, setNavigating] = useState(false);
+  const navigationLock = useRef(false);
   const [cart, setCart] = useState(null);
   const [error, setError] = useState("");
   useEffect(() => {
@@ -88,8 +92,8 @@ export default function CartPage() {
                       <button
                         type="button"
                         aria-label={`Decrease quantity of ${item.productName}`}
-                        disabled={item.quantity <= 1}
-                        onClick={() => change(item.productId, item.quantity - 1)}
+                        disabled={busy || item.quantity <= 1}
+                        onClick={() => run(() => change(item.productId, item.quantity - 1))}
                       >
                         −
                       </button>
@@ -97,8 +101,8 @@ export default function CartPage() {
                       <button
                         type="button"
                         aria-label={`Increase quantity of ${item.productName}`}
-                        disabled={item.quantity >= Math.min(20, item.stock)}
-                        onClick={() => change(item.productId, item.quantity + 1)}
+                        disabled={busy || item.quantity >= Math.min(20, item.stock)}
+                        onClick={() => run(() => change(item.productId, item.quantity + 1))}
                       >
                         +
                       </button>
@@ -108,7 +112,8 @@ export default function CartPage() {
                       className="cart-delete"
                       aria-label={`Remove ${item.productName} from cart`}
                       title="Remove item"
-                      onClick={() => change(item.productId, 0)}
+                      disabled={busy}
+                      onClick={() => run(() => change(item.productId, 0))}
                     >
                       <svg viewBox="0 0 24 24" aria-hidden="true">
                         <path d="M4 7h16M9 7V4h6v3m-9 0 1 13h8l1-13M10 11v5m4-5v5" />
@@ -131,9 +136,13 @@ export default function CartPage() {
               </div>
               <Link
                 className="button"
-                aria-disabled={checkoutBlocked}
+                aria-disabled={checkoutBlocked || busy || navigating}
                 href={checkoutBlocked ? "/cart" : "/checkout"}
-                onClick={(event) => { if (checkoutBlocked) event.preventDefault(); }}
+                onNavigate={(event) => {
+                  if (checkoutBlocked || busy || navigationLock.current) { event.preventDefault(); return; }
+                  navigationLock.current = true;
+                  setNavigating(true);
+                }}
               >
                 Checkout
               </Link>

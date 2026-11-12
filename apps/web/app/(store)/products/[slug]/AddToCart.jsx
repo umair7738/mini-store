@@ -4,10 +4,13 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { money } from "../../../../lib/money";
+import { usePending } from "../../../usePending";
 import { notify } from "../../../Toast";
 
 export default function AddToCart({ product }) {
   const router = useRouter();
+  const [busy, run] = usePending();
+  const [navigating, setNavigating] = useState(false);
   const [quantity, setQuantity] = useState(1);
   const [message, setMessage] = useState("");
   const totalFils = product.priceFils * quantity;
@@ -15,6 +18,7 @@ export default function AddToCart({ product }) {
     event.preventDefault();
     setMessage("");
     if (event.nativeEvent.submitter?.value === "buy") {
+      setNavigating(true);
       router.push(`/checkout?buyNow=${encodeURIComponent(product.slug)}&quantity=${quantity}`);
       return;
     }
@@ -27,7 +31,7 @@ export default function AddToCart({ product }) {
       notify("Added to cart");
     } catch (error) { notify(error.message, "error"); }
   }
-  return <form onSubmit={add} className="purchase-form">
+  return <form onSubmit={(event) => { event.preventDefault(); if (!navigating) run(() => add(event)); }} className="purchase-form">
     <p className="product-price-line"><span>Price</span> {money(product.priceFils)}</p>
     <p className="product-stock-meta"><strong>SKU:</strong> {product.sku} · {product.stock > 0 ? "In stock" : "Out of stock"}</p>
     <div className="purchase-quantity"><span className="purchase-label">Quantity</span><div className="cart-quantity" role="group" aria-label="Quantity">
@@ -36,8 +40,8 @@ export default function AddToCart({ product }) {
     </div></div>
     <div className="purchase-total"><span>Total</span><strong>{money(totalFils)}</strong></div>
     <div className="purchase-actions">
-      <button className="button" disabled={!product.stock}>Add to cart</button>
-      <button className="button secondary" type="submit" name="action" value="buy" disabled={!product.stock}>Buy now</button>
+      <button className="button" disabled={!product.stock || busy || navigating}>Add to cart</button>
+      <button className="button secondary" type="submit" name="action" value="buy" disabled={!product.stock || busy || navigating}>Buy now</button>
     </div>
     {message && <p role="status">{message} <Link href="/cart">View cart →</Link></p>}
   </form>;

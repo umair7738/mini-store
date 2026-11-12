@@ -8,7 +8,7 @@ import { HttpError } from "./validation.js";
 
 export const uploadsRouter = Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { files: 8, fileSize: 8 * 1024 * 1024 } });
-const uploadDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../..", "web", "public", "uploads", "products");
+export const uploadDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../..", "web", "public", "uploads", "products");
 
 function imageType(buffer) {
   if (buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return "png";

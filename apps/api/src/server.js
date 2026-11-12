@@ -8,7 +8,7 @@ import { publicProducts, adminProducts } from "./products.js";
 import { cartRouter } from "./cart.js";
 import { checkoutRouter } from "./checkout.js";
 import { ordersRouter, adminOrders } from "./orders.js";
-import { uploadsRouter } from "./uploads.js";
+import { uploadDir, uploadsRouter } from "./uploads.js";
 import { customerRouter } from "./customerAuth.js";
 import { HttpError } from "./validation.js";
 import { clientAddress, cookieKey, rateLimit } from "./rateLimit.js";
@@ -61,6 +61,7 @@ app.get("/api/health", async (req, res) => {
   await pool.query("SELECT 1");
   res.json({ status: "ok" });
 });
+app.use("/api/uploads/products", express.static(uploadDir));
 app.use("/api/products", rateLimit({ name: "products", limitEnv: "RATE_LIMIT_PUBLIC_PER_MINUTE", fallbackLimit: 120, key: (req) => [clientAddress(req)] }), publicProducts);
 app.use("/api/cart", rateLimit({ name: "cart", limitEnv: "RATE_LIMIT_CART_PER_MINUTE", fallbackLimit: 60, key: (req) => [clientAddress(req), cookieKey(req, "mini_cart")] }), cartRouter);
 app.use("/api/checkout",

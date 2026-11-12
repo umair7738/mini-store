@@ -3,10 +3,12 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { usePending } from "../../usePending";
 import { focusField, invalidForm, notify } from "../../Toast";
 
 export default function AdminLoginPage() {
   const router = useRouter();
+  const [busy, run] = usePending();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -44,7 +46,7 @@ export default function AdminLoginPage() {
         <Link href="/" className="back-link">← Return to storefront</Link>
       </div>
       <form
-        onSubmit={submit}
+        onSubmit={(event) => { event.preventDefault(); run(() => submit(event)); }}
         onInvalid={invalidForm}
         className="form-panel admin-login-form"
       >
@@ -74,7 +76,7 @@ export default function AdminLoginPage() {
             onChange={(event) => setPassword(event.target.value)}
           />
         </label>
-        <button className="button">Open workspace</button>
+        <button className="button" disabled={busy}>Open workspace</button>
         {error && (
           <p role="alert" className="error">
             {error}

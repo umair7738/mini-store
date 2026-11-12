@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS orders (
   idempotency_key VARCHAR(128) NULL,
   status ENUM('placed', 'processing', 'shipped', 'delivered', 'completed', 'cancelled') NOT NULL DEFAULT 'placed',
   status_updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  payment_status ENUM('unknown', 'unpaid', 'paid') NOT NULL DEFAULT 'unknown',
   carrier VARCHAR(80) NULL,
   tracking_number VARCHAR(120) NULL,
   tracking_url VARCHAR(500) NULL,

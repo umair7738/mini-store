@@ -351,8 +351,8 @@ async function executeAttempt(req, res, input, prepared) {
     const publicId = randomUUID();
     const [order] = await connection.execute(
       `INSERT INTO orders (public_id, customer_id, cart_id, customer_name, customer_email, customer_phone, customer_address,
-                           total_fils, idempotency_key, confirmation_token_hash, confirmation_expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 24 HOUR))`,
+                           total_fils, idempotency_key, confirmation_token_hash, confirmation_expires_at, payment_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 24 HOUR), 'unpaid')`,
       [publicId, customer?.id || null, cart.id, input.name, input.email, input.phone, input.address, totalFils, input.idempotencyKey, hashToken(randomBytes(32).toString("base64url"))],
     );
     for (const item of orderItems) await connection.execute("INSERT INTO order_items (order_id, product_id, product_name, sku, unit_price_fils, quantity) VALUES (?, ?, ?, ?, ?, ?)", [order.insertId, item.id, item.product_name, item.sku, item.price_fils, item.quantity]);

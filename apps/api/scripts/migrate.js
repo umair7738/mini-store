@@ -33,6 +33,10 @@ try {
     );
     await connection.query(migration);
   }
+  const [paymentStatus] = await connection.execute(
+    "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'orders' AND COLUMN_NAME = 'payment_status'",
+  );
+  if (!paymentStatus.length) await connection.query("ALTER TABLE orders ADD COLUMN payment_status ENUM('unknown', 'unpaid', 'paid') NOT NULL DEFAULT 'unknown' AFTER status_updated_at");
   const [tracking] = await connection.execute(
     "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'orders' AND COLUMN_NAME = 'tracking_number'",
   );

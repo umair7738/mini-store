@@ -3,6 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { usePending } from "../usePending";
 import { notify } from "../Toast";
 
 const AdminContext = createContext(null);
@@ -18,6 +19,7 @@ const links = [
 ];
 
 export default function AdminShell({ children }) {
+  const [busy, run] = usePending();
   const pathname = usePathname();
   const router = useRouter();
   const isLogin = pathname === "/admin/login";
@@ -130,7 +132,7 @@ export default function AdminShell({ children }) {
           </nav>
           <div className="admin-sidebar-bottom">
             <Link href="/">View storefront ↗</Link>
-            <button type="button" onClick={logout}>Sign out</button>
+            <button type="button" disabled={busy} onClick={() => run(logout)}>Sign out</button>
           </div>
         </aside>
         <div className="admin-workspace">
