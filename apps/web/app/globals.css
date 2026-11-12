@@ -1094,6 +1094,23 @@ nav a:hover,
 .account-auth .account-card > p:last-child { margin-bottom:0; }
 .checkout-account-prompt { padding:10px 12px; background:#f4f6f3; color:var(--muted); font-size:.9rem; }
 .order-confirmation-actions { display:flex; align-items:center; flex-wrap:wrap; gap:12px; margin:20px 0; }
+.order-confirmation { padding-top: clamp(24px, 4vw, 48px); padding-bottom: clamp(24px, 4vw, 64px); min-height: auto; }
+.order-confirmation h1 { font-size: clamp(2rem, 5vw, 3rem); margin-bottom: 6px; }
+.order-confirmation .lead { font-size: 1rem; max-width: none; margin: 0 0 18px; }
+.order-confirmation .order-status-card { margin: 16px 0; padding: 18px; }
+.order-confirmation .customer-progress { gap: 6px; }
+.order-confirmation .customer-progress li { font-size: 0.78rem; gap: 5px; }
+.order-confirmation .customer-progress span { width: 22px; height: 22px; font-size: 0.85rem; }
+.order-confirmation .customer-tracking { margin: 14px 0 0; padding: 10px 14px; font-size: 0.9rem; }
+.order-confirmation .summary { margin-top: 16px; }
+.order-confirmation .summary h2 { font-size: 1.25rem; margin: 0 0 8px; }
+.order-confirmation .summary-line { padding: 10px 0; font-size: 0.95rem; }
+.order-confirmation .summary-total { font-size: 1.2rem; padding: 16px 0 8px; }
+.order-confirmation .fine-print { margin-top: 14px; font-size: 0.78rem; }
+.order-confirmation .order-confirmation-actions { margin: 16px 0 0; gap: 10px; }
+.order-confirmation .order-confirmation-actions .button { padding: 10px 18px; font-size: 0.95rem; }
+.order-confirmation-body { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 24px; align-items: start; }
+@media (max-width: 700px) { .order-confirmation-body { grid-template-columns: 1fr; gap: 16px; } }
 @media(max-width:700px) { .orders-tools,.account-grid { grid-template-columns:1fr; } .customer-order-card header,.customer-order-card footer { align-items:flex-start; } .site-header nav { max-width:72vw; overflow-x:auto; white-space:nowrap; } }
 @media (max-width: 700px) { .product-admin-row { grid-template-columns:54px minmax(0,1fr) auto; gap:10px; } .product-admin-row > img,.product-admin-row > .admin-product-thumb { width:54px;height:60px; } .product-admin-row > .status-pill { display:none; } .product-admin-actions { grid-column:2 / -1; } }
 @media (max-width:700px) { .product-form { padding:18px; } .product-editor-heading { align-items:flex-start; } .product-editor-heading p { max-width:32ch; } .product-form-grid { grid-template-columns:1fr; gap:16px; } .product-inventory-panel { padding:16px; } }

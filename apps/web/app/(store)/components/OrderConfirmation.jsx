@@ -33,7 +33,7 @@ export default function OrderConfirmation({ orderId }) {
   }, [orderId]);
 
   return (
-    <section className="section narrow">
+    <section className="section narrow order-confirmation">
       <p className="eyebrow">ORDER CONFIRMATION</p>
       {error ? <div className="empty"><h1>Confirmation unavailable</h1><p>{error}</p><Link href="/shop">Return to shop</Link></div> : !order ? <p role="status">Loading confirmation…</p> : (
         <>
@@ -46,13 +46,13 @@ export default function OrderConfirmation({ orderId }) {
               {order.trackingNumber && <p className="customer-tracking"><strong>{order.carrier}</strong> tracking: {order.trackingNumber}{order.trackingUrl && <> · <a href={order.trackingUrl} target="_blank" rel="noopener noreferrer">Track shipment ↗</a></>}</p>}
             </section>
           )}
-          <div className="summary">
+          <div className="order-confirmation-body"><div className="summary">
             <h2>Order {order.orderNumber}</h2>
             <p>Placed {formatDate(order.createdAt, { dateStyle: "short", timeStyle: "short" })}</p>
             {order.items.map((item, index) => <div className="summary-line" key={index}><span>{item.productName}<small>SKU: {item.sku} × {item.quantity}</small></span><strong>{money(item.unitPriceFils * item.quantity)}</strong></div>)}
             <div className="summary-total"><span>Total</span><strong>{money(order.totalFils)}</strong></div>
           </div>
-          <div className="order-confirmation-actions"><Link className="button" href={`/orders/${order.orderNumber}`}>View order</Link><Link className="button secondary" href="/orders">My Orders</Link><Link className="text-button" href="/shop">Continue shopping</Link></div>
+          <div className="order-confirmation-actions"><Link className="button secondary" href="/orders">My Orders</Link><Link className="text-button" href="/shop">Continue shopping</Link></div></div>
         </>
       )}
     </section>
