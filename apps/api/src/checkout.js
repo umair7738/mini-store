@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { Router } from "express";
 import { pool } from "./db.js";
 import { getCart } from "./cart.js";
@@ -75,6 +75,62 @@ function errorMessage(code) {
     INSUFFICIENT_STOCK: "A product has insufficient stock",
     ITEM_UNAVAILABLE: "A product is no longer available",
   }[code] || "Checkout could not be completed";
+}
+
+function encodeIntent(value) {
+  const payload = Buffer.from(JSON.stringify(value)).toString("base64url");
+  const signature = createHmac("sha256", process.env.CSRF_SECRET).update(payload).digest("base64url");
+  return `${payload}.${signature}`;
+}
+
+function decodeIntent(token) {
+  if (typeof token !== "string") throw new HttpError(400, "INVALID_BUY_NOW_INTENT", "Buy Now intent is invalid or expired");
+  const [payload, signature, extra] = token.split(".");
+  const expected = createHmac("sha256", process.env.CSRF_SECRET).update(payload || "").digest();
+  const actual = Buffer.from(signature || "", "base64url");
+  if (extra !== undefined || actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new HttpError(400, "INVALID_BUY_NOW_INTENT", "Buy Now intent is invalid or expired");
+  try {
+    const value = JSON.parse(Buffer.from(payload, "base64url").toString());
+    if (!Number.isSafeInteger(value.expiresAt) || value.expiresAt <= Date.now()) throw new Error();
+    return value;
+  } catch { throw new HttpError(400, "INVALID_BUY_NOW_INTENT", "Buy Now intent is invalid or expired"); }
+}
+
+checkoutRouter.post("/intent", async (req, res) => {
+  object(req.body, ["productId", "quantity"]);
+  const productId = id(req.body.productId);
+  const quantity = integer(req.body.quantity, "Quantity", 1, 20);
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const customer = await getCustomer(req, connection);
+    let guest = await getGuestSession(req, connection, !customer);
+    const cart = await getCart(req, res, connection, { create: true, lock: true });
+    const [products] = await connection.execute("SELECT stock, is_active FROM products WHERE id = ?", [productId]);
+    if (!products.length || !products[0].is_active) throw new HttpError(404, "NOT_FOUND", "Product not available");
+    if (products[0].stock < quantity) throw new HttpError(409, "INSUFFICIENT_STOCK", `Only ${products[0].stock} available.`);
+    const [cartItems] = await connection.execute("SELECT quantity FROM cart_items WHERE cart_id = ? AND product_id = ? FOR UPDATE", [cart.id, productId]);
+    const attemptId = randomUUID();
+    const intent = encodeIntent({
+      attemptId, productId, quantity, sourceCartId: cart.id, sourceQuantity: cartItems[0]?.quantity || 0,
+      customerId: customer?.id || null, guestSessionId: guest?.id || null, expiresAt: Date.now() + 60 * 60 * 1000,
+    });
+    await connection.commit();
+    if (guest?.isNew) setGuestCookie(res, guest.token);
+    res.json({ attemptId, intent });
+  } catch (error) { await connection.rollback().catch(() => {}); throw error; }
+  finally { connection.release(); }
+});
+
+async function authorizeBuyNowIntent(req, token, attemptId, buyNow) {
+  const intent = decodeIntent(token);
+  const [customer, guest] = await Promise.all([getCustomer(req), getGuestSession(req)]);
+  if (intent.attemptId !== attemptId || intent.productId !== buyNow.productId || intent.quantity !== buyNow.quantity
+    || (intent.customerId && intent.customerId !== customer?.id)
+    || (intent.guestSessionId && intent.guestSessionId !== guest?.id)) {
+    throw new HttpError(409, "INVALID_BUY_NOW_INTENT", "Buy Now intent does not match this session or selection");
+  }
+  return { sourceCartId: intent.sourceCartId, sourceQuantity: intent.sourceQuantity };
 }
 
 const persistedFailureCodes = new Set([
@@ -187,7 +243,7 @@ async function cleanupAttempts(db) {
   );
 }
 
-async function reserveAttempt(req, res, input, mode, buyNow) {
+async function reserveAttempt(req, res, input, mode, buyNow, buyNowCartState) {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
@@ -278,12 +334,14 @@ async function reserveAttempt(req, res, input, mode, buyNow) {
     else guest = null;
     validateAttemptPrincipal({ customerId: customer?.id, guestSessionId: guest?.id });
     const claimToken = randomBytes(32).toString("base64url");
+    const itemsSnapshot = snapshotItems(cartItems);
+    if (buyNowCartState) Object.assign(itemsSnapshot[0], buyNowCartState);
     const [created] = await connection.execute(
       `INSERT INTO checkout_idempotency_keys
          (idempotency_key, mode, customer_id, guest_session_id, cart_id, immutable_fingerprint,
           items_snapshot, status, claim_hash, lease_until, expires_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'in_progress', ?, DATE_ADD(UTC_TIMESTAMP(6), INTERVAL ${leaseSeconds()} SECOND), DATE_ADD(UTC_TIMESTAMP(6), INTERVAL ${retentionDays()} DAY))`,
-      [input.idempotencyKey, mode, customer?.id || null, guest?.id || null, cart?.id || null, immutableFingerprint(input, mode, buyNow), JSON.stringify(snapshotItems(cartItems)), hashToken(claimToken)],
+      [input.idempotencyKey, mode, customer?.id || null, guest?.id || null, cart?.id || null, immutableFingerprint(input, mode, buyNow), JSON.stringify(itemsSnapshot), hashToken(claimToken)],
     );
     await connection.commit();
     if (guest?.isNew) setGuestCookie(res, guest.token);
@@ -319,7 +377,8 @@ async function executeAttempt(req, res, input, prepared) {
     if (!principalMatches(attempt, customer, guest)) throw new HttpError(409, "IDEMPOTENCY_CONFLICT", errorMessage("IDEMPOTENCY_CONFLICT"));
     await connection.execute("UPDATE checkout_idempotency_keys SET status = 'processing', claim_hash = NULL, lease_until = NULL WHERE id = ?", [attempt.id]);
 
-    const items = parseSnapshot(attempt.items_snapshot).map((item) => ({ product_id: item.productId, quantity: item.quantity }));
+    const savedItems = parseSnapshot(attempt.items_snapshot);
+    const items = savedItems.map((item) => ({ product_id: item.productId, quantity: item.quantity }));
     let cart = attempt.cart_id ? { id: attempt.cart_id } : null;
     if (attempt.mode === "cart") {
       const [carts] = await connection.execute("SELECT id, status, expires_at FROM carts WHERE id = ? FOR UPDATE", [attempt.cart_id]);
@@ -350,7 +409,8 @@ async function executeAttempt(req, res, input, prepared) {
     const totalFils = orderItems.reduce((sum, item) => sum + item.price_fils * item.quantity, 0);
     if (!Number.isSafeInteger(totalFils)) throw new HttpError(400, "INVALID_TOTAL", "Cart total is too large");
     if (input.expectedTotalFils !== totalFils) throw new HttpError(409, "PRICE_CHANGED", errorMessage("PRICE_CHANGED"));
-    if (orderItems.some((item) => item.stock < item.quantity)) throw new HttpError(409, "INSUFFICIENT_STOCK", errorMessage("INSUFFICIENT_STOCK"));
+    const unavailableStock = orderItems.find((item) => item.stock < item.quantity);
+    if (unavailableStock) throw new HttpError(409, "INSUFFICIENT_STOCK", `Only ${unavailableStock.stock} available for ${unavailableStock.product_name}.`);
     for (const item of orderItems) {
       const [updated] = await connection.execute("UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ? AND is_active = 1", [item.quantity, item.id, item.quantity]);
       if (!updated.affectedRows) throw new HttpError(409, "INSUFFICIENT_STOCK", errorMessage("INSUFFICIENT_STOCK"));
@@ -371,6 +431,19 @@ async function executeAttempt(req, res, input, prepared) {
       [publicId, orderCustomer.id, cart.id, input.name, input.email, input.phone, input.address, totalFils, input.idempotencyKey, hashToken(randomBytes(32).toString("base64url"))],
     );
     for (const item of orderItems) await connection.execute("INSERT INTO order_items (order_id, product_id, product_name, sku, unit_price_fils, quantity) VALUES (?, ?, ?, ?, ?, ?)", [order.insertId, item.id, item.product_name, item.sku, item.price_fils, item.quantity]);
+    if (attempt.mode === "buy_now" && savedItems[0]?.sourceCartId && savedItems[0]?.sourceQuantity) {
+      const sourceCartId = savedItems[0].sourceCartId;
+      const [sourceCarts] = await connection.execute("SELECT status FROM carts WHERE id = ? FOR UPDATE", [sourceCartId]);
+      if (sourceCarts[0]?.status === "active") {
+        const [sourceItems] = await connection.execute("SELECT quantity FROM cart_items WHERE cart_id = ? AND product_id = ? FOR UPDATE", [sourceCartId, items[0].product_id]);
+        if (sourceItems.length) {
+          const consumed = Math.min(items[0].quantity, savedItems[0].sourceQuantity, sourceItems[0].quantity);
+          const remaining = sourceItems[0].quantity - consumed;
+          if (remaining) await connection.execute("UPDATE cart_items SET quantity = ? WHERE cart_id = ? AND product_id = ?", [remaining, sourceCartId, items[0].product_id]);
+          else await connection.execute("DELETE FROM cart_items WHERE cart_id = ? AND product_id = ?", [sourceCartId, items[0].product_id]);
+        }
+      }
+    }
     if (guest) await connection.execute("INSERT INTO guest_session_orders (guest_session_id, order_id) VALUES (?, ?)", [guest.id, order.insertId]);
     await connection.execute("INSERT INTO order_events (order_id, event_type, message) VALUES (?, 'placed', 'Order placed')", [order.insertId]);
     await connection.execute("UPDATE carts SET status = 'checked_out' WHERE id = ? AND status = 'active'", [cart.id]);
@@ -411,11 +484,12 @@ checkoutRouter.post("/", async (req, res) => {
   if (!/^[A-Za-z0-9_-]+$/.test(idempotencyKey)) throw new HttpError(400, "INVALID_INPUT", "Idempotency key has an invalid format");
   const expectedTotalFils = integer(req.body.expectedTotalFils, "Expected total", 0, Number.MAX_SAFE_INTEGER);
   const buyNow = req.body.buyNow;
-  if (buyNow !== undefined) object(buyNow, ["productId", "quantity"]);
+  if (buyNow !== undefined) object(buyNow, ["productId", "quantity", "intent"]);
   const mode = buyNow === undefined ? "cart" : "buy_now";
   const normalizedBuyNow = buyNow === undefined ? null : { productId: id(buyNow.productId), quantity: integer(buyNow.quantity, "Quantity", 1, 20) };
+  const buyNowCartState = mode === "buy_now" ? await authorizeBuyNowIntent(req, buyNow.intent, idempotencyKey, normalizedBuyNow) : null;
   const input = { name, email: customerEmail, phone: customerPhone, address, expectedTotalFils, idempotencyKey };
-  const prepared = await reserveAttempt(req, res, input, mode, normalizedBuyNow);
+  const prepared = await reserveAttempt(req, res, input, mode, normalizedBuyNow, buyNowCartState);
   if (prepared.replay) return replayResponse(prepared.replay, res, req);
   return executeAttempt(req, res, input, prepared);
 });

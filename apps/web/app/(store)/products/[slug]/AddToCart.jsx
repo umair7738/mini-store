@@ -21,16 +21,19 @@ export default function AddToCart({ product }) {
   async function add(event) {
     event.preventDefault();
     setMessage("");
-    if (event.nativeEvent.submitter?.value === "buy") {
-      setNavigating(true);
-      router.push(`/checkout?buyNow=${encodeURIComponent(product.slug)}&quantity=${quantity}`);
-      return;
-    }
     try {
+      if (event.nativeEvent.submitter?.value === "buy") {
+        const response = await apiFetch("/api/checkout/intent", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ productId: product.id, quantity }) });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.message || "Could not start Buy Now checkout");
+        setNavigating(true);
+        router.push(`/checkout?buyNow=${encodeURIComponent(product.slug)}&quantity=${quantity}&attempt=${encodeURIComponent(data.attemptId)}&intent=${encodeURIComponent(data.intent)}`);
+        return;
+      }
       await store.add(product.id, quantity);
       setMessage("Added to cart.");
       notify("Added to cart");
-    } catch (error) { notify(error.message, "error"); }
+    } catch (error) { setNavigating(false); notify(error.message, "error"); }
   }
   return <form onSubmit={(event) => { event.preventDefault(); if (!navigating) run(() => add(event)); }} className="purchase-form">
     <p className="product-price-line"><span>Price</span> {money(product.priceFils)}</p>

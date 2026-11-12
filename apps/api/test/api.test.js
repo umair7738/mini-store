@@ -32,7 +32,12 @@ test("product-only API, cart, checkout and order history", async (t) => {
     if (csrf) headers["X-CSRF-Token"] = csrf;
     if (orderToken) headers["X-Order-Token"] = orderToken;
     const response = await fetch(base + path, { method, headers, ...(body && { body: JSON.stringify(body) }) });
-    return { status: response.status, data: response.status === 204 ? null : await response.json(), cookie: response.headers.get("set-cookie")?.split(";")[0] };
+    const cookies = new Map((cookie || "").split(/;\s*/).filter(Boolean).map((value) => [value.slice(0, value.indexOf("=")), value]));
+    for (const setCookie of response.headers.getSetCookie()) {
+      const value = setCookie.split(";", 1)[0];
+      cookies.set(value.slice(0, value.indexOf("=")), value);
+    }
+    return { status: response.status, data: response.status === 204 ? null : await response.json(), cookie: [...cookies.values()].join("; ") };
   }
   const email = `test-${suffix}@example.com`;
   const password = randomBytes(16).toString("base64url");
@@ -64,7 +69,7 @@ test("product-only API, cart, checkout and order history", async (t) => {
   });
 
   await t.test("uploaded product images can be retrieved", async () => {
-    const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aWQAAAAASUVORK5CYII=", "base64");
+    const bytes = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADUlEQVQImWNgYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==", "base64");
     const form = new FormData();
     form.append("images", new Blob([bytes], { type: "image/png" }), "test.png");
     const uploaded = await fetch(`${base}/api/admin/uploads/images`, { method: "POST", headers: { Origin: process.env.WEB_ORIGIN, Cookie: login.cookie, "X-CSRF-Token": login.data.csrfToken }, body: form });
@@ -114,6 +119,7 @@ test("product-only API, cart, checkout and order history", async (t) => {
     const add = (quantity) => call("/api/cart/items", { method: "POST", cookie: cart.cookie, body: { productId, quantity } });
     assert.equal((await add(21)).status, 400);
     assert.equal((await add(2)).data.items[0].productId, productId);
+    assert.equal((await pool.execute("SELECT stock FROM products WHERE id = ?", [productId]))[0][0].stock, 3);
     assert.equal((await add(1)).data.items[0].quantity, 3);
     assert.equal((await add(1)).status, 409);
     assert.equal((await admin(`/api/admin/products/${productId}/permanent`, "DELETE")).status, 409);
@@ -141,8 +147,11 @@ test("product-only API, cart, checkout and order history", async (t) => {
     assert.equal((await call(`/api/orders/${placed.data.orderNumber}`, { cookie: placed.cookie })).data.order.items[0].sku, item.sku);
     assert.equal((await call(`/api/orders/${placed.data.orderNumber}`)).status, 404);
     assert.equal((await call("/api/orders", { cookie: placed.cookie })).data.orders[0].orderNumber, placed.data.orderNumber);
-    assert.equal((await call("/api/orders/forget-device", { method: "POST", cookie: placed.cookie })).status, 204);
-    assert.equal((await call(`/api/orders/${placed.data.orderNumber}`, { cookie: placed.cookie })).status, 404);
+    const forgotten = await call("/api/orders/forget-device", { method: "POST", cookie: placed.cookie });
+    assert.equal(forgotten.status, 204);
+    const guestOnly = forgotten.cookie.split(/;\s*/).filter((value) => !value.startsWith("mini_customer=")).join("; ");
+    assert.equal((await call(`/api/orders/${placed.data.orderNumber}`, { cookie: guestOnly })).status, 404);
+    assert.equal((await call(`/api/orders/${placed.data.orderNumber}`, { cookie: forgotten.cookie })).status, 200);
     const accountPassword = randomBytes(16).toString("base64url");
     const account = await call("/api/customer/register", { method: "POST", body: { name: "Test Buyer", email: `buyer-${suffix}@example.com`, phone: "+971 50 123 4567", password: accountPassword } });
     assert.equal(account.status, 201);
@@ -161,7 +170,7 @@ test("product-only API, cart, checkout and order history", async (t) => {
     assert.equal((await call("/api/customer/addresses", { cookie: account.cookie })).data.addresses[0].label, "Apartment");
     const loggedIn = await call("/api/customer/login", { method: "POST", body: { email: `buyer-${suffix}@example.com`, password: "wrong-password" } });
     assert.equal(loggedIn.status, 401);
-    const relogin = await call("/api/customer/login", { method: "POST", body: { email: `buyer-${suffix}@example.com`, password: accountPassword } });
+    const relogin = await call("/api/customer/login", { method: "POST", cookie: placed.cookie, body: { email: `buyer-${suffix}@example.com`, password: accountPassword } });
     assert.equal(relogin.status, 200);
     assert.equal((await call("/api/orders", { cookie: relogin.cookie })).data.orders.length, 1);
     await call("/api/customer/profile", { method: "PUT", cookie: relogin.cookie, csrf: relogin.data.customer.csrfToken, body: { name: "Updated Buyer", phone: "+971 50 987 6543" } });
@@ -194,7 +203,9 @@ test("product-only API, cart, checkout and order history", async (t) => {
     const activeCart = await call("/api/cart", { cookie: verified.cookie });
     const browserCookies = `${activeCart.cookie}; ${verified.cookie}`;
     await call("/api/cart/items", { method: "POST", cookie: activeCart.cookie, body: { productId: keptItem.data.id, quantity: 1 } });
-    const bought = await call("/api/checkout", { method: "POST", cookie: browserCookies, body: { name: "Test Buyer", email: `buyer-${suffix}@example.com`, phone: "+971 50 123 4567", address: "123 Main Street, Dubai", expectedTotalFils: 90000, idempotencyKey: `buy-now-${suffix.toLowerCase()}`, buyNow: { productId: second.data.id, quantity: 2 } } });
+    const intent = await call("/api/checkout/intent", { method: "POST", cookie: browserCookies, body: { productId: second.data.id, quantity: 2 } });
+    assert.equal(intent.status, 200, JSON.stringify(intent.data));
+    const bought = await call("/api/checkout", { method: "POST", cookie: `${browserCookies}; ${intent.cookie || ""}`, body: { name: "Test Buyer", email: `buyer-${suffix}@example.com`, phone: "+971 50 123 4567", address: "123 Main Street, Dubai", expectedTotalFils: 90000, idempotencyKey: intent.data.attemptId, buyNow: { productId: second.data.id, quantity: 2, intent: intent.data.intent } } });
     assert.equal(bought.status, 201, JSON.stringify(bought.data));
     assert.equal((await admin(`/api/admin/orders/${bought.data.orderId}/status`, "PATCH", { status: "delivered", carrier: "Test carrier", trackingNumber: "TRACK123" })).status, 200);
     const delivered = (await admin(`/api/admin/orders/${bought.data.orderId}`)).data.order;
@@ -206,6 +217,9 @@ test("product-only API, cart, checkout and order history", async (t) => {
     const retainedCart = await call("/api/cart", { cookie: activeCart.cookie });
     assert.equal(retainedCart.data.items.length, 1);
     assert.equal(retainedCart.data.items[0].productId, keptItem.data.id);
+    assert.equal((await call(`/api/orders/${bought.data.orderNumber}`, { cookie: bought.cookie })).status, 200);
+    assert.equal((await call(`/api/orders/${bought.data.orderNumber}`, { cookie: browserCookies })).status, 404);
+    await pool.execute("UPDATE orders SET customer_id = NULL WHERE id = ?", [bought.data.orderId]);
     assert.equal((await call(`/api/orders/${bought.data.orderNumber}`, { cookie: browserCookies })).status, 200);
     await pool.execute("UPDATE guest_sessions SET expires_at = DATE_SUB(UTC_TIMESTAMP(6), INTERVAL 1 DAY) WHERE token_hash = ?", [hashToken(verified.cookie.split("=")[1])]);
     assert.equal((await call(`/api/orders/${bought.data.orderNumber}`, { cookie: browserCookies })).status, 404);

@@ -26,7 +26,7 @@ const terminalCodes = [
   "IDEMPOTENCY_LEGACY_RETRY_REQUIRED",
 ];
 
-export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attempt = "" }) {
+export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attempt = "", intent = "" }) {
   const router = useRouter();
   const shared = useCart();
   const [cart, setCart] = useState(null);
@@ -35,6 +35,7 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
   const [attemptId, setAttemptId] = useState(attempt);
   const [pendingAttempt, setPendingAttempt] = useState(null);
   const [pendingGate, setPendingGate] = useState(null);
+  const [buyNowFailed, setBuyNowFailed] = useState(false);
   const [initialized, setInitialized] = useState(false);
   const [readyVersion, setReadyVersion] = useState(0);
   const [error, setError] = useState("");
@@ -42,7 +43,6 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
   const [navigating, setNavigating] = useState(false);
   const [customer, setCustomer] = useState(null);
   const [addresses, setAddresses] = useState([]);
-
   function clearPending() {
     try { window.sessionStorage.removeItem(pendingStorageKey); } catch {}
     setPendingAttempt(null);
@@ -73,13 +73,14 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
     }
     const activeAttempt = attempt || crypto.randomUUID();
     setAttemptId(activeAttempt);
+    if (buyNow) setIdempotencyKey(activeAttempt);
     if (!attempt) {
       const url = new URL(window.location.href);
       url.searchParams.set("attempt", activeAttempt);
       window.history.replaceState({}, "", url);
     }
     setInitialized(true);
-  }, [attempt]);
+  }, [attempt, buyNow]);
 
   async function loadCart() {
     await shared.store.load();
@@ -101,19 +102,24 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
           if (addressResponse.ok && !cancelled) setAddresses((await addressResponse.json()).addresses);
         }
         if (buyNow) {
-          await shared.store.load();
-          if (!cartResponse.ok) throw new Error("Cart is unavailable");
           const response = await apiFetch(`/api/products/${encodeURIComponent(buyNow)}`, { cache: "no-store" });
           if (!response.ok) throw new Error("This product is unavailable");
           const product = (await response.json()).product;
-          const quantity = Math.max(1, Math.min(20, Number.parseInt(buyNowQuantity, 10) || 1));
-          if (!cancelled) setCart({ items: [{ productId: product.id, productName: product.name, productSlug: product.slug, imageUrl: product.imageUrl, sku: product.sku, quantity, priceFils: product.priceFils, lineTotalFils: product.priceFils * quantity, available: product.stock > 0 }], totalFils: product.priceFils * quantity });
+          const quantity = Number(buyNowQuantity);
+          if (!Number.isInteger(quantity) || quantity < 1 || quantity > 20) throw new Error("Choose a quantity from 1 to 20.");
+          const item = { productId: product.id, productName: product.name, sku: product.sku, imageUrl: product.imageUrl, priceFils: product.priceFils, lineTotalFils: product.priceFils * quantity, quantity, stock: product.stock, available: true };
+          if (!cancelled) {
+            setCart({ items: [item], totalFils: item.lineTotalFils });
+            if (product.stock < quantity) setError(`Only ${product.stock} available. Reduce the quantity to continue.`);
+          }
         } else await loadCart();
-      } catch (problem) { if (!cancelled) setError(problem.message || "Cart is unavailable"); }
+      } catch (problem) {
+        if (!cancelled) setError(problem.message || "Cart is unavailable");
+      }
     };
     load();
     return () => { cancelled = true; };
-  }, [buyNow, buyNowQuantity, initialized, pendingGate, readyVersion]);
+  }, [attemptId, buyNow, buyNowQuantity, initialized, intent, pendingGate, readyVersion]);
 
   async function reconcile(record) {
     if (!record?.body) return;
@@ -129,13 +135,17 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
         const message = data.code === "PRICE_CHANGED" ? "Prices changed. Review the updated total before submitting again." : data.message;
         setError(message);
         notify(message, "error");
-        if (terminalCodes.includes(data.code)) beginNewAttempt();
+        if (terminalCodes.includes(data.code)) {
+          if (buyNow) { clearPending(); setBuyNowFailed(true); }
+          else beginNewAttempt();
+        }
         else setPendingGate(record);
         return;
       }
       clearPending();
       notify("Order placed successfully");
       if (!buyNow) shared.store.replace({ items: [], totalFils: 0 });
+      else await shared.store.load(true);
       setNavigating(true);
       router.push(`/orders/${data.orderNumber}`);
     } catch {
@@ -157,12 +167,17 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
       }
     }
     setError("");
+    const unavailableItem = cart.items.find((item) => !item.available || item.quantity > item.stock);
+    if (unavailableItem) {
+      setError(`Only ${unavailableItem.stock} available for ${unavailableItem.productName}.`);
+      return;
+    }
     const requestKey = idempotencyKey || crypto.randomUUID();
     const body = {
       ...form,
       expectedTotalFils: cart.totalFils,
       idempotencyKey: requestKey,
-      ...(buyNow && { buyNow: { productId: cart.items[0].productId, quantity: cart.items[0].quantity } }),
+      ...(buyNow && { buyNow: { productId: cart.items[0].productId, quantity: Number(buyNowQuantity), intent } }),
     };
     const pending = { attemptId, idempotencyKey: requestKey, body, createdAt: Date.now() };
     try { window.sessionStorage.setItem(pendingStorageKey, JSON.stringify(pending)); } catch {}
@@ -183,7 +198,10 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
         setError(message);
         notify(message, "error");
         if (!buyNow) await loadCart();
-        if (terminalCodes.includes(data.code)) beginNewAttempt();
+        if (terminalCodes.includes(data.code)) {
+          if (buyNow) { clearPending(); setBuyNowFailed(true); }
+          else beginNewAttempt();
+        }
         else setPendingGate(pending);
         if (data.code === "PRICE_CHANGED") {
           const summary = document.querySelector(".summary");
@@ -195,6 +213,7 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
       notify("Order placed successfully");
       clearPending();
       if (!buyNow) shared.store.replace({ items: [], totalFils: 0 });
+      else await shared.store.load(true);
       setNavigating(true);
       router.push(`/orders/${data.orderNumber}`);
     } catch {
@@ -210,7 +229,7 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
       <h1>Checkout</h1>
       {error && (
         <p className="notice error" role="alert">
-          {error}
+          {error}{buyNow && (buyNowFailed || cart?.items.some((item) => item.quantity > item.stock)) && <> <Link href={`/products/${encodeURIComponent(buyNow)}`}>Return to product</Link> and start Buy Now again.</>}
         </p>
       )}
       {pendingGate ? (
@@ -235,7 +254,7 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
             className="form-panel"
           >
             <h2>Shipping address</h2>
-            {!customer && <p className="checkout-account-prompt">Checking out as a guest. <Link href={`/account/login?next=${encodeURIComponent(`${buyNow ? `/checkout?buyNow=${buyNow}&quantity=${buyNowQuantity}` : "/checkout"}${attemptId ? `&attempt=${attemptId}` : ""}`)}`}>Sign in</Link> is optional.</p>}
+            {!customer && <p className="checkout-account-prompt">Checking out as a guest. <Link href={`/account/login?next=${encodeURIComponent(`${buyNow ? `/checkout?buyNow=${buyNow}&quantity=${buyNowQuantity}&intent=${encodeURIComponent(intent)}` : "/checkout"}${attemptId ? `&attempt=${attemptId}` : ""}`)}`}>Sign in</Link> is optional.</p>}
             {addresses.length > 0 && <label>Saved address<select defaultValue="" onChange={(event) => { const address = addresses.find((item) => item.id === Number(event.target.value)); if (address) setForm((current) => ({ ...current, name: address.name, phone: address.phone, address: address.address })); }}><option value="">Choose an address</option>{addresses.map((address) => <option value={address.id} key={address.id}>{address.label} — {address.address}</option>)}</select></label>}
             <div className="checkout-fields">
               <label className="checkout-field-wide">
@@ -310,7 +329,7 @@ export default function CheckoutPage({ buyNow = "", buyNowQuantity = "1", attemp
                 <span className="payment-code">COD</span>
               </label>
             </fieldset>
-            <button className="button" disabled={busy || navigating || !initialized || (!buyNow && (shared.pending || shared.unresolved))}>
+            <button className="button" disabled={busy || navigating || buyNowFailed || !initialized || cart.items.some((item) => !item.available || item.quantity > item.stock) || (!buyNow && (shared.pending || shared.unresolved))}>
               {busy
                 ? "Placing order…"
                 : `Place order · ${money(cart.totalFils)}`}

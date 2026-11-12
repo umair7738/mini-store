@@ -14,7 +14,8 @@ export default function CustomerAuthForm({ register = false, next = "/account" }
   async function submit(event) {
     event.preventDefault(); setBusy(true); setError("");
     try {
-      const response = await apiFetch(`/api/customer/${register ? "register" : "login"}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
+      const payload = register ? form : { email: form.email, password: form.password };
+      const response = await apiFetch(`/api/customer/${register ? "register" : "login"}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const data = await response.json();
       if (!response.ok) throw new Error(data.message || "Could not complete account request");
       router.replace(next.startsWith("/") && !next.startsWith("//") ? next : "/account");

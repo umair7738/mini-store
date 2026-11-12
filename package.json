@@ -5,8 +5,10 @@
   "scripts": {
     "dev:api": "npm run dev --workspace @mini-store/api",
     "dev:web": "npm run dev --workspace @mini-store/web",
+    "db:start": "powershell -ExecutionPolicy Bypass -File ./db.ps1",
     "db:migrate": "npm run db:migrate --workspace @mini-store/api",
     "db:seed": "npm run db:seed --workspace @mini-store/api",
+    "db:stop": "powershell -ExecutionPolicy Bypass -File ./db-stop.ps1",
     "admin:create": "npm run admin:create --workspace @mini-store/api",
     "test": "npm run test --workspace @mini-store/api"
   }

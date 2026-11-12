@@ -146,7 +146,11 @@ ordersRouter.post(
     guest = await getGuestSession(req, connection, true);
     await connection.execute("UPDATE order_recovery_tokens SET used_at = UTC_TIMESTAMP(6) WHERE token_hash = ?", [hashToken(token)]);
     await connection.execute("INSERT IGNORE INTO guest_session_orders (guest_session_id, order_id) SELECT ?, id FROM orders WHERE customer_email = ?", [guest.id, tokens[0].customer_email]);
-    await connection.execute("UPDATE orders o JOIN customers c ON c.email = o.customer_email SET o.customer_id = c.id WHERE o.customer_email = ? AND o.customer_id IS NULL", [tokens[0].customer_email]);
+    await connection.execute(`UPDATE orders o
+      JOIN customers c ON c.email = o.customer_email
+      LEFT JOIN customers pending ON pending.id = o.customer_id
+      SET o.customer_id = c.id
+      WHERE o.customer_email = ? AND (o.customer_id IS NULL OR (pending.email IS NULL AND pending.pending_email = ?))`, [tokens[0].customer_email, tokens[0].customer_email]);
     await connection.commit();
   } catch (error) { await connection.rollback(); throw error; }
   finally { connection.release(); }

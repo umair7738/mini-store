@@ -79,6 +79,12 @@ test("checkout idempotency and concurrency use real database transactions", asyn
     return rows[0].stock;
   }
 
+  async function buyNowIntent(cookie, item, quantity) {
+    const prepared = await call("/api/checkout/intent", { method: "POST", cookie, body: { productId: item.id, quantity } });
+    assert.equal(prepared.status, 200, JSON.stringify(prepared.data));
+    return { ...prepared.data, cookie: mergeCookies(cookie, prepared.cookies) };
+  }
+
   await t.test("checkout remembers an unverified customer and verification enables sign in", async () => {
     const item = await product(21000, 2);
     const cookie = await cartWithItem(item);
@@ -183,10 +189,12 @@ test("checkout idempotency and concurrency use real database transactions", asyn
       const result = await call("/api/cart");
       return mergeCookies("", result.cookies);
     })();
-    const buyNowBody = checkoutBody(buyNowItem, `buy-now-${suffix}`, { buyNow: { productId: buyNowItem.id, quantity: 1 } });
-    const bought = await call("/api/checkout", { method: "POST", cookie: buyNowCookie, body: buyNowBody });
+    const intent = await buyNowIntent(buyNowCookie, buyNowItem, 1);
+    const buyNowCookieWithIntent = mergeCookies(buyNowCookie, intent.cookie);
+    const buyNowBody = checkoutBody(buyNowItem, intent.attemptId, { buyNow: { productId: buyNowItem.id, quantity: 1, intent: intent.intent } });
+    const bought = await call("/api/checkout", { method: "POST", cookie: buyNowCookieWithIntent, body: buyNowBody });
     assert.equal(bought.status, 201, JSON.stringify(bought.data));
-    const boughtAgain = await call("/api/checkout", { method: "POST", cookie: buyNowCookie, body: buyNowBody });
+    const boughtAgain = await call("/api/checkout", { method: "POST", cookie: buyNowCookieWithIntent, body: buyNowBody });
     assert.equal(boughtAgain.status, 200);
     assert.equal(await stock(buyNowItem), 1);
     const foreignCookie = await (async () => {
@@ -195,11 +203,11 @@ test("checkout idempotency and concurrency use real database transactions", asyn
     })();
     const foreignReplay = await call("/api/checkout", { method: "POST", cookie: foreignCookie, body: buyNowBody });
     assert.equal(foreignReplay.status, 409);
-    assert.equal(foreignReplay.data.code, "IDEMPOTENCY_CONFLICT");
+    assert.equal(foreignReplay.data.code, "INVALID_BUY_NOW_INTENT");
     const [attempts] = await pool.execute("SELECT mode, status, cart_id FROM checkout_idempotency_keys WHERE idempotency_key = ?", [buyNowBody.idempotencyKey]);
     assert.deepEqual([attempts[0].mode, attempts[0].status, Boolean(attempts[0].cart_id)], ["buy_now", "completed", true]);
     await pool.execute("DELETE FROM checkout_idempotency_keys WHERE idempotency_key = ?", [buyNowBody.idempotencyKey]);
-    const expiredBuyNow = await call("/api/checkout", { method: "POST", cookie: buyNowCookie, body: buyNowBody });
+    const expiredBuyNow = await call("/api/checkout", { method: "POST", cookie: buyNowCookieWithIntent, body: buyNowBody });
     assert.equal(expiredBuyNow.status, 409);
     assert.equal(expiredBuyNow.data.code, "IDEMPOTENCY_EXPIRED");
     assert.equal(await stock(buyNowItem), 1);
@@ -236,5 +244,106 @@ test("checkout idempotency and concurrency use real database transactions", asyn
     const recovered = await call("/api/checkout", { method: "POST", cookie: staleCookie, body: staleBody });
     assert.equal(recovered.status, 201, JSON.stringify(recovered.data));
     assert.equal(await stock(staleItem), 0);
+  });
+
+  await t.test("buy-now uses only the selected quantity and preserves the rest of the cart", async () => {
+    const item = await product(37000, 10);
+    const unrelated = await product(18000, 10);
+    const cookie = await cartWithItem(item, 4);
+    const intent = await buyNowIntent(cookie, item, 2);
+    await call("/api/cart/items", { method: "POST", cookie, body: { productId: unrelated.id, quantity: 3 } });
+    const body = checkoutBody(item, intent.attemptId, {
+      expectedTotalFils: item.priceFils * 2,
+      buyNow: { productId: item.id, quantity: 2, intent: intent.intent },
+    });
+    const placed = await call("/api/checkout", { method: "POST", cookie: intent.cookie, body });
+    assert.equal(placed.status, 201, JSON.stringify(placed.data));
+    const [[ordered]] = await pool.execute("SELECT quantity FROM order_items WHERE order_id = ? AND product_id = ?", [placed.data.orderId, item.id]);
+    assert.equal(ordered.quantity, 2);
+    const token = cookie.match(/(?:^|; )mini_cart=([^;]+)/)?.[1];
+    const [[cart]] = await pool.query("SELECT id FROM carts WHERE token_hash = ?", [hashToken(token)]);
+    const [cartItems] = await pool.execute("SELECT product_id, quantity FROM cart_items WHERE cart_id = ? ORDER BY product_id", [cart.id]);
+    assert.deepEqual(cartItems.map(({ product_id, quantity }) => [product_id, quantity]), [[item.id, 2], [unrelated.id, 3]].sort((a, b) => a[0] - b[0]));
+    assert.equal(await stock(item), 8);
+    assert.equal((await call("/api/checkout", { method: "POST", cookie: intent.cookie, body })).data.orderId, placed.data.orderId);
+    assert.equal(await stock(item), 8);
+
+    for (const selectedQuantity of [4, 6]) {
+      const nextItem = await product(29000, 10);
+      const nextCookie = await cartWithItem(nextItem, 4);
+      const nextIntent = await buyNowIntent(nextCookie, nextItem, selectedQuantity);
+      const nextBody = checkoutBody(nextItem, nextIntent.attemptId, {
+        expectedTotalFils: nextItem.priceFils * selectedQuantity,
+        buyNow: { productId: nextItem.id, quantity: selectedQuantity, intent: nextIntent.intent },
+      });
+      const [first, second] = await Promise.all([
+        call("/api/checkout", { method: "POST", cookie: nextIntent.cookie, body: nextBody }),
+        call("/api/checkout", { method: "POST", cookie: nextIntent.cookie, body: nextBody }),
+      ]);
+      assert.ok([201, 200, 409].includes(first.status) && [201, 200, 409].includes(second.status));
+      const placedOrder = first.status === 201 || first.status === 200 ? first : second;
+      assert.ok([201, 200].includes(placedOrder.status));
+      const [[nextOrderItem]] = await pool.execute("SELECT quantity FROM order_items WHERE order_id = ? AND product_id = ?", [placedOrder.data.orderId, nextItem.id]);
+      assert.equal(nextOrderItem.quantity, selectedQuantity);
+      assert.equal(await stock(nextItem), 10 - selectedQuantity);
+      const nextToken = nextCookie.match(/(?:^|; )mini_cart=([^;]+)/)?.[1];
+      const [[nextCart]] = await pool.query("SELECT id FROM carts WHERE token_hash = ?", [hashToken(nextToken)]);
+      const [remaining] = await pool.execute("SELECT quantity FROM cart_items WHERE cart_id = ? AND product_id = ?", [nextCart.id, nextItem.id]);
+      assert.equal(remaining[0]?.quantity || 0, Math.max(4 - selectedQuantity, 0));
+    }
+  });
+
+  await t.test("buy-now keeps same-product cart additions made after intent creation", async () => {
+    const item = await product(24000, 10);
+    const cookie = await cartWithItem(item, 4);
+    const intent = await buyNowIntent(cookie, item, 2);
+    await call("/api/cart/items", { method: "POST", cookie, body: { productId: item.id, quantity: 3 } });
+    const body = checkoutBody(item, intent.attemptId, { expectedTotalFils: item.priceFils * 2, buyNow: { productId: item.id, quantity: 2, intent: intent.intent } });
+    const placed = await call("/api/checkout", { method: "POST", cookie: intent.cookie, body });
+    assert.equal(placed.status, 201, JSON.stringify(placed.data));
+    const [[cart]] = await pool.query("SELECT id FROM carts WHERE token_hash = ?", [hashToken(intent.cookie.match(/(?:^|; )mini_cart=([^;]+)/)?.[1])]);
+    const [[remaining]] = await pool.execute("SELECT quantity FROM cart_items WHERE cart_id = ? AND product_id = ?", [cart.id, item.id]);
+    assert.equal(remaining.quantity, 5);
+  });
+
+  await t.test("buy-now intent is session-bound, selection-bound, single-key, and server-priced", async () => {
+    const item = await product(27000, 5);
+    const cart = await call("/api/cart");
+    const cookie = mergeCookies("", cart.cookies);
+    const intent = await buyNowIntent(cookie, item, 2);
+    const body = checkoutBody(item, intent.attemptId, { expectedTotalFils: item.priceFils * 2, buyNow: { productId: item.id, quantity: 2, intent: intent.intent } });
+    const tokenParts = intent.intent.split(".");
+    tokenParts[1] = `${tokenParts[1][0] === "A" ? "B" : "A"}${tokenParts[1].slice(1)}`;
+    const tampered = await call("/api/checkout", { method: "POST", cookie: intent.cookie, body: { ...body, buyNow: { ...body.buyNow, intent: tokenParts.join(".") } } });
+    assert.equal(tampered.status, 400);
+    assert.equal(tampered.data.code, "INVALID_BUY_NOW_INTENT");
+    const changedQuantity = await call("/api/checkout", { method: "POST", cookie: intent.cookie, body: { ...body, buyNow: { ...body.buyNow, quantity: 3 } } });
+    assert.equal(changedQuantity.status, 409);
+    assert.equal(changedQuantity.data.code, "INVALID_BUY_NOW_INTENT");
+    const changedKey = await call("/api/checkout", { method: "POST", cookie: intent.cookie, body: { ...body, idempotencyKey: `replay-${suffix}` } });
+    assert.equal(changedKey.status, 409);
+    assert.equal(changedKey.data.code, "INVALID_BUY_NOW_INTENT");
+    const changedPrice = await call("/api/checkout", { method: "POST", cookie: intent.cookie, body: { ...body, expectedTotalFils: item.priceFils * 2 - 1 } });
+    assert.equal(changedPrice.status, 409);
+    assert.equal(changedPrice.data.code, "PRICE_CHANGED");
+    assert.equal(await stock(item), 5);
+  });
+
+  await t.test("buy-now reports current stock and rejects invalid quantities", async () => {
+    const item = await product(26000, 10);
+    const cart = await call("/api/cart");
+    const cookie = mergeCookies("", cart.cookies);
+    const intent = await buyNowIntent(cookie, item, 4);
+    await pool.execute("UPDATE products SET stock = 2 WHERE id = ?", [item.id]);
+    const body = checkoutBody(item, intent.attemptId, { expectedTotalFils: item.priceFils * 4, buyNow: { productId: item.id, quantity: 4, intent: intent.intent } });
+    const unavailable = await call("/api/checkout", { method: "POST", cookie: intent.cookie, body });
+    assert.equal(unavailable.status, 409);
+    assert.equal(unavailable.data.code, "INSUFFICIENT_STOCK");
+    assert.match(unavailable.data.message, /Only 2 available/);
+    assert.equal(await stock(item), 2);
+    for (const quantity of [0, 1.5, 21]) {
+      const invalid = await call("/api/checkout", { method: "POST", cookie: intent.cookie, body: { ...body, idempotencyKey: `invalid-${String(quantity).replace(".", "_")}-${suffix}`, buyNow: { productId: item.id, quantity, intent: intent.intent } } });
+      assert.equal(invalid.status, 400);
+    }
   });
 });

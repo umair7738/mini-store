@@ -59,7 +59,7 @@ async function changeCart(req, res, action) {
     const cart = await getCart(req, res, connection, { create: action === "add", lock: true });
     const productId = action === "add" ? id(req.body.productId) : id(req.params.productId);
     if (action !== "remove") {
-      const [products] = await connection.execute("SELECT stock FROM products WHERE id = ? AND is_active = 1 FOR UPDATE", [productId]);
+      const [products] = await connection.execute("SELECT stock FROM products WHERE id = ? AND is_active = 1", [productId]);
       if (!products.length) throw new HttpError(404, "NOT_FOUND", "Product not available");
       const quantity = integer(req.body.quantity, "Quantity", 1, 20);
       const [existing] = await connection.execute("SELECT quantity FROM cart_items WHERE cart_id = ? AND product_id = ? FOR UPDATE", [cart.id, productId]);
