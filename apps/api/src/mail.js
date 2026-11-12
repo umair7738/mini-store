@@ -14,8 +14,10 @@ function sender() {
   return name ? { email, name } : { email };
 }
 
-export async function sendTransactionalEmail({ to, subject, htmlContent }) {
+export async function sendTransactionalEmail({ to, subject, htmlContent, textContent }) {
   if (!isEmailConfigured()) throw new HttpError(503, "EMAIL_NOT_CONFIGURED", "Email is not configured");
+  const payload = { sender: sender(), to: [{ email: to }], subject, htmlContent };
+  if (textContent) payload.textContent = textContent;
   try {
     const response = await fetch(BREVO_ENDPOINT, {
       method: "POST",
@@ -24,7 +26,7 @@ export async function sendTransactionalEmail({ to, subject, htmlContent }) {
         "Content-Type": "application/json",
         Accept: "application/json",
       },
-      body: JSON.stringify({ sender: sender(), to: [{ email: to }], subject, htmlContent }),
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(8000),
     });
     if (!response.ok) {

@@ -9,6 +9,7 @@ import { HttpError, email, id, object, string, webUrl } from "./validation.js";
 import { pagination } from "./pagination.js";
 import { clientAddress, identifierHash, rateLimit } from "./rateLimit.js";
 import { isEmailConfigured, sendOrderRecoveryEmail } from "./mail.js";
+import { sendOrderEmailById } from "./orderEmails.js";
 
 export const ordersRouter = Router();
 export const adminOrders = Router();
@@ -251,6 +252,8 @@ adminOrders.patch("/:id/status", async (req, res) => {
     );
   }
   const connection = await pool.getConnection();
+  let statusChangedTo = null;
+  let changedOrderId = null;
   try {
     await connection.beginTransaction();
     const orderId = id(req.params.id);
@@ -312,15 +315,18 @@ adminOrders.patch("/:id/status", async (req, res) => {
         "INSERT INTO order_events (order_id, event_type, message) VALUES (?, ?, ?)",
         [orderId, status, message],
       );
+      statusChangedTo = status;
+      changedOrderId = orderId;
     }
     await connection.commit();
-    res.json({ status });
   } catch (error) {
-    await connection.rollback();
+    await connection.rollback().catch(() => {});
     throw error;
   } finally {
     connection.release();
   }
+  res.json({ status });
+  if (statusChangedTo) await sendOrderEmailById(statusChangedTo, changedOrderId);
 });
 
 adminOrders.patch("/:id/tracking", async (req, res) => {

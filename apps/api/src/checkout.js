@@ -6,6 +6,7 @@ import { hashToken } from "./auth.js";
 import { getCustomer, setSession, startSession } from "./customerAuth.js";
 import { getGuestSession, setGuestCookie } from "./guestSessions.js";
 import { HttpError, email, id, integer, object, phone, string } from "./validation.js";
+import { sendOrderEmailById } from "./orderEmails.js";
 
 export const checkoutRouter = Router();
 
@@ -365,6 +366,7 @@ async function markFailed(attemptId, code) {
 
 async function executeAttempt(req, res, input, prepared) {
   const connection = await pool.getConnection();
+  let createdOrderId = null;
   try {
     await connection.beginTransaction();
     if (!prepared?.attempt) throw new HttpError(409, "CHECKOUT_STATE_UNCERTAIN", errorMessage("CHECKOUT_STATE_UNCERTAIN"));
@@ -450,6 +452,7 @@ async function executeAttempt(req, res, input, prepared) {
     if (attempt.mode === "cart") await connection.execute("DELETE FROM cart_items WHERE cart_id = ?", [cart.id]);
     await connection.execute("UPDATE checkout_idempotency_keys SET status = 'completed', order_id = ?, claim_hash = NULL, lease_until = NULL WHERE id = ?", [order.insertId, attempt.id]);
     await connection.commit();
+    createdOrderId = order.insertId;
     if (customerToken) setSession(res, customerToken);
     res.status(201).json({ orderId: order.insertId, orderNumber: `DM-${String(order.insertId).padStart(8, "0")}`, publicId, totalFils });
   } catch (error) {
@@ -472,6 +475,7 @@ async function executeAttempt(req, res, input, prepared) {
   } finally {
     connection.release();
   }
+  if (createdOrderId) await sendOrderEmailById("created", createdOrderId);
 }
 
 checkoutRouter.post("/", async (req, res) => {

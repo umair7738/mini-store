@@ -221,8 +221,9 @@ test("Brevo mail integration verification", async (t) => {
       restoreEnv();
       let sent = 0;
       stubBrevo((input, options) => {
-        sent++;
         const body = JSON.parse(options.body);
+        if (body.subject !== "Verify your Danube Milano order") return brevoResponse(201);
+        sent++;
         assert.equal(body.subject, "Verify your Danube Milano order");
         assert.match(body.htmlContent, /\/orders\/recover#[A-Za-z0-9_-]{43}/);
         return brevoResponse(429);
